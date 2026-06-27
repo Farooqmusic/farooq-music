@@ -184,6 +184,12 @@ Future<void> openUrl(String url) async {
   } catch (_) {}
 }
 
+String fmtPlays(int? n) {
+  if (n == null) return '';
+  if (n >= 1000) return '${(n / 1000).toStringAsFixed(1)}K plays';
+  return '$n plays';
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await JustAudioBackground.init(
@@ -601,6 +607,27 @@ class FullPlayer extends StatelessWidget {
   const FullPlayer({super.key});
   String _fmt(Duration d) =>
     '${d.inMinutes}:${(d.inSeconds%60).toString().padLeft(2,'0')}';
+
+  // Upgrade SoundCloud artwork from the small t300x300 to a crisp t500x500.
+  String _hiRes(String url) => url.replaceAll('-t300x300.', '-t500x500.');
+
+  Widget _cover(SCTrack? track, double side) {
+    final url = track?.artworkUrl;
+    Widget ph() => Container(color: kCard,
+      child: Icon(Icons.music_note, color: kPrimary, size: side * 0.3));
+    return Container(width: side, height: side,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [BoxShadow(color: kPrimary.withOpacity(0.4),
+          blurRadius: 40, spreadRadius: 4)]),
+      child: ClipRRect(borderRadius: BorderRadius.circular(20),
+        child: url == null ? ph()
+          : Image.network(_hiRes(url), width: side, height: side,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => Image.network(url,
+                width: side, height: side, fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => ph()))));
+  }
   @override
   Widget build(BuildContext context) => DraggableScrollableSheet(
     initialChildSize:0.92, maxChildSize:0.95, minChildSize:0.5,
@@ -615,18 +642,10 @@ class FullPlayer extends StatelessWidget {
         const SizedBox(height: 20),
         ValueListenableBuilder<SCTrack?>(
           valueListenable: currentTrack,
-          builder: (_, track, __) => Column(children: [
-            Container(width:240, height:240,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(20),
-                boxShadow: [BoxShadow(color:kPrimary.withOpacity(0.4),
-                  blurRadius:40, spreadRadius:4)]),
-              child: ClipRRect(borderRadius: BorderRadius.circular(20),
-                child: track?.artworkUrl != null
-                  ? Image.network(track!.artworkUrl!, fit:BoxFit.cover)
-                  : Container(color:kCard,
-                      child: const Icon(Icons.music_note,
-                        color:kPrimary, size:80)))),
+          builder: (ctx, track, __) => Column(children: [
+            _cover(track,
+              (MediaQuery.of(ctx).size.width - 72).clamp(220.0, 340.0)
+                .toDouble()),
             const SizedBox(height: 24),
             Padding(padding: const EdgeInsets.symmetric(horizontal:32),
               child: Text(track?.title ?? '',
@@ -637,6 +656,13 @@ class FullPlayer extends StatelessWidget {
             const SizedBox(height: 4),
             const Text('Mohammad Farooq · Farooq Music',
               style: TextStyle(color:kMuted, fontSize:13)),
+            if (track != null && (track.genre != null || track.plays != null))
+              Padding(padding: const EdgeInsets.only(top:6),
+                child: Text([
+                  if (track.genre != null) track.genre!.trim(),
+                  if (track.plays != null) fmtPlays(track.plays),
+                ].where((e) => e.isNotEmpty).join('   ·   '),
+                  style: const TextStyle(color:kLight, fontSize:12))),
             const SizedBox(height: 8),
             Row(mainAxisAlignment: MainAxisAlignment.center, children: [
               if (track != null)
