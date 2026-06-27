@@ -5,6 +5,8 @@ import 'package:audio_session/audio_session.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'dart:math';
+import 'package:just_audio_background/just_audio_background.dart';
 
 const kBaseUrl = 'https://farooqmusic.com/mobile.php';
 const kBg      = Color(0xFF1a0e22);
@@ -64,32 +66,50 @@ Future<void> playQueue(List<SCTrack> tracks, int index) async {
   queue = tracks; queueIndex = index; await _load();
 }
 
-bool _isLoading = false;
+int _loadToken = 0;
+int _consecutiveErrors = 0;
 
 Future<void> _load() async {
-  if (queue.isEmpty || _isLoading) return;
-  _isLoading = true;
+  if (queue.isEmpty) return;
+  final myToken = ++_loadToken;            // newest tap wins; older loads abort
   final t = queue[queueIndex];
   currentTrack.value = t;
   try {
     final url = await getStreamUrl(t.id);
-    if (url.isEmpty) { _isLoading = false; nextTrack(); return; }
-    await player.setUrl(url);
+    if (myToken != _loadToken) return;
+    if (url.isEmpty) throw Exception('empty stream url');
+    await player.setAudioSource(AudioSource.uri(
+      Uri.parse(url),
+      tag: MediaItem(
+        id: t.id,
+        title: t.title,
+        artist: 'Mohammad Farooq \u00b7 Farooq Music',
+        artUri: t.artworkUrl != null ? Uri.tryParse(t.artworkUrl!) : null,
+      ),
+    ));
+    if (myToken != _loadToken) return;
+    _consecutiveErrors = 0;
     await player.play();
   } catch (e) {
+    if (myToken != _loadToken) return;
     debugPrint('Load error: $e — skipping');
-    await Future.delayed(const Duration(seconds: 1));
-    _isLoading = false;
-    nextTrack();
-    return;
+    _consecutiveErrors++;
+    if (_consecutiveErrors < queue.length) {
+      await Future.delayed(const Duration(milliseconds: 600));
+      if (myToken == _loadToken) nextTrack();
+    } else {
+      _consecutiveErrors = 0;                // give up after a full loop
+    }
   }
-  _isLoading = false;
 }
 
 void nextTrack() {
   if (queue.isEmpty) return;
   if (isShuffle.value) {
-    queueIndex = (DateTime.now().millisecondsSinceEpoch % queue.length).toInt();
+    if (queue.length > 1) {
+      int n; do { n = Random().nextInt(queue.length); } while (n == queueIndex);
+      queueIndex = n;
+    }
   } else {
     queueIndex = (queueIndex + 1) % queue.length;
   }
@@ -111,6 +131,11 @@ void shareTrack(SCTrack track) {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await JustAudioBackground.init(
+    androidNotificationChannelId: 'com.farooqmusic.app.channel.audio',
+    androidNotificationChannelName: 'Farooq Music',
+    androidNotificationOngoing: true,
+  );
   // Configure audio session — keeps audio playing in background
   final session = await AudioSession.instance;
   await session.configure(const AudioSessionConfiguration.music());
