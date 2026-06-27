@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:just_audio_background/just_audio_background.dart';
@@ -177,6 +178,12 @@ void shareTrack(SCTrack track) {
   Share.share('${track.title} — Farooq Music\n$url');
 }
 
+Future<void> openUrl(String url) async {
+  try {
+    await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+  } catch (_) {}
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await JustAudioBackground.init(
@@ -231,7 +238,8 @@ class _HomeState extends State<HomeScreen> {
   int _tab = 0;
   @override
   Widget build(BuildContext context) => Scaffold(
-    body: IndexedStack(index: _tab, children: const [MusicTab(), VideoTab()]),
+    body: IndexedStack(index: _tab,
+      children: const [MusicTab(), VideoTab(), AboutTab()]),
     bottomNavigationBar: Column(mainAxisSize: MainAxisSize.min, children: [
       const MiniPlayer(),
       NavigationBar(backgroundColor: kCard, selectedIndex: _tab,
@@ -245,7 +253,11 @@ class _HomeState extends State<HomeScreen> {
           NavigationDestination(
             icon: Icon(Icons.smart_display_outlined, color: kMuted),
             selectedIcon: Icon(Icons.smart_display, color: kLight),
-            label: 'Videos')])]));
+            label: 'Videos'),
+          NavigationDestination(
+            icon: Icon(Icons.person_outline, color: kMuted),
+            selectedIcon: Icon(Icons.person, color: kLight),
+            label: 'About')])]));
 }
 
 class MusicTab extends StatefulWidget {
@@ -720,8 +732,169 @@ class VideoTab extends StatelessWidget {
         icon: const Icon(Icons.open_in_new, color:Colors.white),
         label: const Text('Open YouTube Channel',
           style: TextStyle(color:Colors.white, fontWeight:FontWeight.w700)),
-        onPressed: () {}),
+        onPressed: () => openUrl('https://www.youtube.com/@farooqmusicai')),
       const SizedBox(height: 10),
       const Text('In-app videos coming soon',
         style: TextStyle(color:kMuted, fontSize:12))])));
+}
+
+class _Link {
+  final String name, url;
+  const _Link(this.name, this.url);
+}
+
+const _listenLinks = <_Link>[
+  _Link('SoundCloud', 'https://soundcloud.com/farooqmusic'),
+  _Link('Spotify', 'https://open.spotify.com/artist/48uj0NCXikVLNlR9WItNIl'),
+  _Link('Apple Music', 'https://music.apple.com/artist/1896118117'),
+  _Link('YouTube Music',
+    'https://music.youtube.com/channel/UC2PTlcCPO1ks-rz7LfCSIiw'),
+  _Link('Amazon Music',
+    'https://music.amazon.com/artists/B07VG49J2X/mohammad-farooq'),
+  _Link('Tidal', 'https://tidal.com/artist/16247490'),
+  _Link('Deezer', 'https://www.deezer.com/us/artist/69350722'),
+  _Link('Anghami', 'https://play.anghami.com/artist/5113758'),
+];
+
+const _followLinks = <_Link>[
+  _Link('YouTube', 'https://www.youtube.com/@farooqmusicai'),
+  _Link('Instagram', 'https://www.instagram.com/farooqmusicai'),
+  _Link('X', 'https://x.com/farooqmusicai'),
+  _Link('TikTok', 'https://www.tiktok.com/@farooqmusicai'),
+  _Link('Facebook', 'https://www.facebook.com/farooqmusicai'),
+  _Link('Pinterest', 'https://www.pinterest.com/farooqmusic/'),
+  _Link('Tumblr', 'https://www.tumblr.com/farooqmusic'),
+];
+
+const _steps = <List<String>>[
+  ['01 · Words', 'Poetry first',
+    'It starts with meaning — classical Urdu verse from poets like Jaun Elia '
+    'and Hafeez Jalandhri, or original lyrics written to carry a feeling.'],
+  ['02 · Sound', 'AI composition',
+    'Using Suno AI, the words are shaped into music — blending styles from '
+    'Turkish Anatolian rock to cinematic pop.'],
+  ['03 · Craft', 'Shaped & refined',
+    'Each track is guided, re-rolled and curated by Mohammad Farooq until the '
+    'melody, mood and message sit exactly right.'],
+  ['04 · Release', 'Out to the world',
+    'The finished song goes live on SoundCloud and every major platform — and '
+    'lands here for you to play first.'],
+];
+
+class AboutTab extends StatelessWidget {
+  const AboutTab({super.key});
+
+  Widget _chip(_Link l) => GestureDetector(
+    onTap: () => openUrl(l.url),
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+      decoration: BoxDecoration(color: kCard,
+        borderRadius: BorderRadius.circular(99),
+        border: Border.all(color: kBorder)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Text(l.name, style: const TextStyle(color: kOn, fontSize: 13,
+          fontWeight: FontWeight.w600)),
+        const SizedBox(width: 6),
+        const Icon(Icons.open_in_new, color: kLight, size: 14),
+      ])));
+
+  Widget _sectionTitle(String t) => Padding(
+    padding: const EdgeInsets.fromLTRB(0, 22, 0, 10),
+    child: Text(t, style: const TextStyle(color: kLight, fontSize: 13,
+      fontWeight: FontWeight.w800, letterSpacing: 1.2)));
+
+  Widget _bigButton(IconData icon, String label, VoidCallback onTap) =>
+    GestureDetector(onTap: onTap, child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(color: kCard,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: kBorder)),
+      child: Row(children: [
+        Icon(icon, color: kLight, size: 20),
+        const SizedBox(width: 12),
+        Expanded(child: Text(label, style: const TextStyle(color: kOn,
+          fontSize: 14, fontWeight: FontWeight.w600))),
+        const Icon(Icons.open_in_new, color: kMuted, size: 16),
+      ])));
+
+  @override
+  Widget build(BuildContext context) => Scaffold(backgroundColor: kBg,
+    body: SafeArea(child: ListView(
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 28),
+      children: [
+        // ---- Header ----
+        Center(child: Column(children: [
+          Container(width: 96, height: 96,
+            decoration: BoxDecoration(shape: BoxShape.circle,
+              boxShadow: [BoxShadow(color: kPrimary.withOpacity(0.4),
+                blurRadius: 30, spreadRadius: 2)]),
+            child: ClipOval(child: Image.network(
+              'https://farooqmusic.com/farooq-logo.png', fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => Container(color: kCard,
+                child: const Icon(Icons.music_note,
+                  color: kPrimary, size: 40))))),
+          const SizedBox(height: 14),
+          const Text('Farooq Music', style: TextStyle(color: kOn,
+            fontSize: 22, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 2),
+          const Text('Mohammad Farooq · AI Music Producer · Doha',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: kMuted, fontSize: 12)),
+        ])),
+        // ---- Bio ----
+        _sectionTitle('THE ARTIST'),
+        const Text(
+          'Farooq Music is Mohammad Farooq — a Doha-based digital AI music '
+          'producer breathing new life into classical Urdu poetry. He blends '
+          'the timeless verses of legends like Jaun Elia and Hafeez Jalandhri '
+          'with global styles, from Turkish Anatolian rock to cinematic pop, '
+          'creating modern, genre-defying Urdu tracks.',
+          style: TextStyle(color: kOn, fontSize: 14, height: 1.55)),
+        const SizedBox(height: 10),
+        const Text(
+          'New tracks land regularly, and everything you hear streams straight '
+          'from SoundCloud. Follow along for each new release.',
+          style: TextStyle(color: kMuted, fontSize: 13, height: 1.55)),
+        // ---- How it's made ----
+        _sectionTitle("HOW IT'S MADE"),
+        ..._steps.map((s) => Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(color: kCard,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: kBorder)),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+            Text(s[0], style: const TextStyle(color: kLight, fontSize: 11,
+              fontWeight: FontWeight.w700, letterSpacing: 0.5)),
+            const SizedBox(height: 4),
+            Text(s[1], style: const TextStyle(color: kOn, fontSize: 15,
+              fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text(s[2], style: const TextStyle(color: kMuted, fontSize: 12.5,
+              height: 1.5)),
+          ]))),
+        // ---- Listen everywhere ----
+        _sectionTitle('LISTEN EVERYWHERE'),
+        Wrap(spacing: 8, runSpacing: 8,
+          children: _listenLinks.map(_chip).toList()),
+        // ---- Follow ----
+        _sectionTitle('FOLLOW'),
+        Wrap(spacing: 8, runSpacing: 8,
+          children: _followLinks.map(_chip).toList()),
+        // ---- Get in touch ----
+        _sectionTitle('GET IN TOUCH'),
+        _bigButton(Icons.email_outlined, 'contact@farooqmusic.com',
+          () => openUrl('mailto:contact@farooqmusic.com')),
+        const SizedBox(height: 10),
+        _bigButton(Icons.chat_bubble_outline, 'WhatsApp Channel',
+          () => openUrl(
+            'https://whatsapp.com/channel/0029VbBsDpm2f3EL51meaF0x')),
+        const SizedBox(height: 10),
+        _bigButton(Icons.language, 'farooqmusic.com',
+          () => openUrl('https://farooqmusic.com/')),
+        const SizedBox(height: 24),
+        Center(child: Text('Made with Suno AI · © Farooq Music',
+          style: TextStyle(color: kMuted.withOpacity(0.7), fontSize: 11))),
+      ])));
 }
