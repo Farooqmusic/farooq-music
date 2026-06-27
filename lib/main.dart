@@ -19,18 +19,22 @@ const kBorder  = Color(0x33c77dff);
 
 class SCTrack {
   final String id, title;
-  final String? genre, artworkUrl;
+  final String? genre, artworkUrl, lyrics, explanation;
   final int? duration, plays;
   const SCTrack({required this.id, required this.title,
-    this.genre, this.artworkUrl, this.duration, this.plays});
+    this.genre, this.artworkUrl, this.duration, this.plays,
+    this.lyrics, this.explanation});
   factory SCTrack.fromJson(Map<String, dynamic> j) {
     final art = (j['artwork'] ?? j['artwork_url']) as String?;
+    String? str(dynamic v) => (v == null || v == '') ? null : v.toString();
     return SCTrack(
       id: j['id'].toString(), title: j['title'] ?? 'Unknown',
       genre: (j['genre'] ?? '') == '' ? null : j['genre'] as String,
       artworkUrl: art,
       duration: j['duration'] is int ? j['duration'] as int : null,
-      plays: j['plays'] is int ? j['plays'] as int : null);
+      plays: j['plays'] is int ? j['plays'] as int : null,
+      lyrics: str(j['lyrics']),
+      explanation: str(j['explanation']));
   }
 }
 
@@ -273,11 +277,13 @@ class MusicTab extends StatefulWidget {
 class _MusicState extends State<MusicTab> {
   List<SCTrack> _all = [];
   String _q = '';
-  int _sort = 0;                 // 0 newest, 1 oldest, 2 A-Z, 3 most played
+  int _sort = 0;                 // 0 newest, 1 oldest, 2 A-Z, 3 most played, 4 shuffle
+  List<SCTrack>? _shuffled;      // stable random order for the Shuffle sort
   bool _loading = true;
   String? _error;
 
-  static const _sortLabels = ['Newest', 'Oldest', 'A–Z', 'Most played'];
+  static const _sortLabels =
+    ['Newest', 'Oldest', 'A–Z', 'Most played', 'Shuffle'];
 
   @override void initState() { super.initState(); _load(); }
 
@@ -303,7 +309,8 @@ class _MusicState extends State<MusicTab> {
       case 2: l.sort((a, b) =>
         a.title.toLowerCase().compareTo(b.title.toLowerCase())); return l;
       case 3: l.sort((a, b) => (b.plays ?? 0).compareTo(a.plays ?? 0)); return l;
-      default: return l;          // newest (API order)
+      case 4: return _shuffled ?? l;     // stable random order
+      default: return l;                 // newest (API order)
     }
   }
 
@@ -440,7 +447,10 @@ class _MusicState extends State<MusicTab> {
           PopupMenuButton<int>(
             color: kCard,
             initialValue: _sort,
-            onSelected: (v) => setState(() => _sort = v),
+            onSelected: (v) => setState(() {
+              _sort = v;
+              if (v == 4) _shuffled = [..._all]..shuffle();
+            }),
             itemBuilder: (_) => [
               for (var i = 0; i < _sortLabels.length; i++)
                 PopupMenuItem(value: i, child: Text(_sortLabels[i],
@@ -664,13 +674,28 @@ class FullPlayer extends StatelessWidget {
                 ].where((e) => e.isNotEmpty).join('   ·   '),
                   style: const TextStyle(color:kLight, fontSize:12))),
             const SizedBox(height: 8),
-            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Wrap(alignment: WrapAlignment.center,
+              spacing: 2, runSpacing: 0, children: [
               if (track != null)
                 TextButton.icon(
                   icon: const Icon(Icons.share, color:kLight, size:18),
                   label: const Text('Share',
                     style: TextStyle(color:kLight, fontSize:13)),
-                  onPressed: () => shareTrack(track!))])])),
+                  onPressed: () => shareTrack(track!)),
+              if (track?.lyrics != null)
+                TextButton.icon(
+                  icon: const Icon(Icons.article_outlined,
+                    color:kLight, size:18),
+                  label: const Text('Lyrics',
+                    style: TextStyle(color:kLight, fontSize:13)),
+                  onPressed: () => openUrl(track!.lyrics!)),
+              if (track?.explanation != null)
+                TextButton.icon(
+                  icon: const Icon(Icons.menu_book_outlined,
+                    color:kLight, size:18),
+                  label: const Text('Explanation',
+                    style: TextStyle(color:kLight, fontSize:13)),
+                  onPressed: () => openUrl(track!.explanation!))])])),
         const SizedBox(height: 12),
         StreamBuilder<Duration>(
           stream: player.positionStream,
