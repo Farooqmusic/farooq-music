@@ -5,7 +5,6 @@ import 'package:audio_session/audio_session.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'dart:math';
 import 'package:just_audio_background/just_audio_background.dart';
 
 const kBaseUrl = 'https://farooqmusic.com/mobile.php';
@@ -58,71 +57,119 @@ final player       = AudioPlayer();
 final currentTrack = ValueNotifier<SCTrack?>(null);
 final isPlaying    = ValueNotifier<bool>(false);
 final isShuffle    = ValueNotifier<bool>(false);
-final isRepeat     = ValueNotifier<bool>(false);
-List<SCTrack> queue = [];
-int queueIndex = 0;
+final isRepeat     = ValueNotifier<bool>(false);   // true = repeat current track
+final isPreparing  = ValueNotifier<bool>(false);   // resolving playlist URLs
+
+List<SCTrack> queue = [];                 // same order as the loaded playlist
+ConcatenatingAudioSource? _playlist;
+String _loadedSig = '';                   // ids of the currently loaded list
+int _playToken = 0;
+
+String _sigOf(List<SCTrack> ts) => ts.map((t) => t.id).join(',');
+
+AudioSource _sourceFor(SCTrack t, String url) => AudioSource.uri(
+  Uri.parse(url),
+  tag: MediaItem(
+    id: t.id,
+    title: t.title,
+    artist: 'Mohammad Farooq \u00b7 Farooq Music',
+    artUri: t.artworkUrl != null ? Uri.tryParse(t.artworkUrl!) : null,
+  ),
+);
+
+// Resolve every track's stream URL, capped at 12 requests in parallel.
+Future<List<String?>> _resolveAll(List<SCTrack> ts, int token) async {
+  final out = List<String?>.filled(ts.length, null);
+  int cursor = 0;
+  Future<void> worker() async {
+    while (true) {
+      final i = cursor++;
+      if (i >= ts.length || token != _playToken) break;
+      try { out[i] = await getStreamUrl(ts[i].id); } catch (_) {}
+    }
+  }
+  await Future.wait(List.generate(12, (_) => worker()));
+  return out;
+}
 
 Future<void> playQueue(List<SCTrack> tracks, int index) async {
-  queue = tracks; queueIndex = index; await _load();
-}
+  if (tracks.isEmpty) return;
+  final token = ++_playToken;
+  final sig = _sigOf(tracks);
 
-int _loadToken = 0;
-int _consecutiveErrors = 0;
+  // Same list already loaded -> just jump to the tapped track (instant).
+  if (sig == _loadedSig && _playlist != null && queue.isNotEmpty) {
+    final at = queue.indexWhere((t) => t.id == tracks[index].id);
+    await player.seek(Duration.zero, index: at < 0 ? 0 : at);
+    await player.play();
+    return;
+  }
 
-Future<void> _load() async {
-  if (queue.isEmpty) return;
-  final myToken = ++_loadToken;            // newest tap wins; older loads abort
-  final t = queue[queueIndex];
-  currentTrack.value = t;
+  isPreparing.value = true;
+  currentTrack.value = tracks[index];        // show tapped track right away
   try {
-    final url = await getStreamUrl(t.id);
-    if (myToken != _loadToken) return;
-    if (url.isEmpty) throw Exception('empty stream url');
-    await player.setAudioSource(AudioSource.uri(
-      Uri.parse(url),
-      tag: MediaItem(
-        id: t.id,
-        title: t.title,
-        artist: 'Mohammad Farooq \u00b7 Farooq Music',
-        artUri: t.artworkUrl != null ? Uri.tryParse(t.artworkUrl!) : null,
-      ),
-    ));
-    if (myToken != _loadToken) return;
-    _consecutiveErrors = 0;
+    final urls = await _resolveAll(tracks, token);
+    if (token != _playToken) return;
+
+    final sources = <AudioSource>[];
+    final ordered = <SCTrack>[];
+    int startIndex = 0;
+    for (var k = 0; k < tracks.length; k++) {
+      final u = urls[k];
+      if (u != null && u.isNotEmpty) {
+        if (k == index) startIndex = sources.length;
+        sources.add(_sourceFor(tracks[k], u));
+        ordered.add(tracks[k]);
+      }
+    }
+    if (sources.isEmpty) return;
+
+    queue = ordered;
+    _playlist = ConcatenatingAudioSource(children: sources);
+    _loadedSig = sig;
+
+    await player.setLoopMode(isRepeat.value ? LoopMode.one : LoopMode.all);
+    await player.setShuffleModeEnabled(isShuffle.value);
+    await player.setAudioSource(_playlist!, initialIndex: startIndex);
+    if (token != _playToken) return;
+    if (isShuffle.value) await player.shuffle();
     await player.play();
   } catch (e) {
-    if (myToken != _loadToken) return;
-    debugPrint('Load error: $e — skipping');
-    _consecutiveErrors++;
-    if (_consecutiveErrors < queue.length) {
-      await Future.delayed(const Duration(milliseconds: 600));
-      if (myToken == _loadToken) nextTrack();
-    } else {
-      _consecutiveErrors = 0;                // give up after a full loop
-    }
+    debugPrint('playQueue error: $e');
+  } finally {
+    if (token == _playToken) isPreparing.value = false;
   }
 }
 
-void nextTrack() {
-  if (queue.isEmpty) return;
-  if (isShuffle.value) {
-    if (queue.length > 1) {
-      int n; do { n = Random().nextInt(queue.length); } while (n == queueIndex);
-      queueIndex = n;
-    }
-  } else {
-    queueIndex = (queueIndex + 1) % queue.length;
-  }
-  _load();
-}
-
-void prevTrack() {
-  if (queue.isEmpty) return;
-  queueIndex = (queueIndex - 1 + queue.length) % queue.length;
-  _load();
-}
-
+void nextTrack() => player.seekToNext();
+void prevTrack() => player.seekToPrevious();
 void togglePlay() => player.playing ? player.pause() : player.play();
+
+Future<void> toggleShuffle() async {
+  isShuffle.value = !isShuffle.value;
+  await player.setShuffleModeEnabled(isShuffle.value);
+  if (isShuffle.value) await player.shuffle();
+}
+
+Future<void> toggleRepeat() async {
+  isRepeat.value = !isRepeat.value;
+  await player.setLoopMode(isRepeat.value ? LoopMode.one : LoopMode.all);
+}
+
+// Re-resolve a single track whose SoundCloud URL expired, then resume it.
+Future<void> _recoverIndex(int i) async {
+  if (_playlist == null || i < 0 || i >= queue.length) return;
+  try {
+    final fresh = await getStreamUrl(queue[i].id);
+    if (fresh.isEmpty) { player.seekToNext(); return; }
+    await _playlist!.removeAt(i);
+    await _playlist!.insert(i, _sourceFor(queue[i], fresh));
+    await player.seek(Duration.zero, index: i);
+    await player.play();
+  } catch (_) {
+    player.seekToNext();
+  }
+}
 
 void shareTrack(SCTrack track) {
   final url = 'https://farooqmusic.com/share.php?track=${track.id}';
@@ -149,14 +196,17 @@ void main() async {
     systemNavigationBarColor: kBg));
   player.playerStateStream.listen((s) {
     isPlaying.value = s.playing;
-    if (s.processingState == ProcessingState.completed) {
-      if (isRepeat.value) {
-        player.seek(Duration.zero);
-        player.play();
-      } else {
-        Future.delayed(const Duration(milliseconds: 300), nextTrack);
-      }
-    }
+  });
+  // Keep the UI in sync with whichever track the sequence is on
+  // (covers in-app next/prev AND the lock-screen buttons).
+  player.currentIndexStream.listen((i) {
+    if (i != null && i >= 0 && i < queue.length) currentTrack.value = queue[i];
+  });
+  // If a SoundCloud URL has expired by the time we reach it, re-fetch it.
+  player.playbackEventStream.listen((_) {}, onError: (Object e, StackTrace st) {
+    final i = player.currentIndex;
+    debugPrint('playback error: $e');
+    if (i != null) _recoverIndex(i);
   });
   runApp(const FarooqApp());
 }
@@ -348,10 +398,17 @@ class MiniPlayer extends StatelessWidget {
                 IconButton(
                   icon: const Icon(Icons.skip_previous, color:kOn, size:22),
                   onPressed: prevTrack),
-                IconButton(
-                  icon: Icon(p ? Icons.pause_circle : Icons.play_circle,
-                    color:kPrimary, size:38),
-                  onPressed: togglePlay),
+                ValueListenableBuilder<bool>(
+                  valueListenable: isPreparing,
+                  builder: (_, prep, __) => prep
+                    ? const Padding(padding: EdgeInsets.all(8),
+                        child: SizedBox(width:24, height:24,
+                          child: CircularProgressIndicator(
+                            strokeWidth:2.4, color:kPrimary)))
+                    : IconButton(
+                        icon: Icon(p ? Icons.pause_circle : Icons.play_circle,
+                          color:kPrimary, size:38),
+                        onPressed: togglePlay)),
                 IconButton(
                   icon: const Icon(Icons.skip_next, color:kOn, size:22),
                   onPressed: nextTrack)])),
@@ -442,7 +499,7 @@ class FullPlayer extends StatelessWidget {
               builder: (_, s, __) => IconButton(
                 icon: Icon(Icons.shuffle,
                   color: s ? kLight : kMuted, size:26),
-                onPressed: () => isShuffle.value = !isShuffle.value)),
+                onPressed: toggleShuffle)),
             IconButton(
               icon: const Icon(Icons.skip_previous, color:kOn, size:36),
               onPressed: prevTrack),
@@ -462,7 +519,7 @@ class FullPlayer extends StatelessWidget {
               builder: (_, r, __) => IconButton(
                 icon: Icon(Icons.repeat,
                   color: r ? kLight : kMuted, size:26),
-                onPressed: () => isRepeat.value = !isRepeat.value))])),
+                onPressed: toggleRepeat))])),
         const SizedBox(height: 20)])));
 }
 
