@@ -1,6 +1,7 @@
 # Codemagic build configuration — Farooq Music (iOS)
-# Produces a signed App Store .ipa using the "Farooq Music" API key
-# already connected in Codemagic (Developer Portal integration).
+# Automatic App Store signing: Codemagic creates the certificate and
+# provisioning profile for com.farooqmusic.app if they don't exist yet,
+# using the "Farooq Music" API key and the CERTIFICATE_PRIVATE_KEY secret.
 
 workflows:
   ios-farooq-music:
@@ -10,9 +11,10 @@ workflows:
     integrations:
       app_store_connect: Farooq Music
     environment:
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: com.farooqmusic.app
+      groups:
+        - farooq_signing      # must contain CERTIFICATE_PRIVATE_KEY (secret)
+      vars:
+        BUNDLE_ID: "com.farooqmusic.app"
       flutter: stable
       xcode: latest
     scripts:
@@ -23,7 +25,19 @@ workflows:
       - name: Get Flutter packages
         script: |
           flutter pub get
-      - name: Set up code signing
+      - name: Initialize keychain
+        script: |
+          keychain initialize
+      - name: Create / fetch signing files
+        script: |
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --certificate-key @env:CERTIFICATE_PRIVATE_KEY \
+            --create
+      - name: Add certificate to keychain
+        script: |
+          keychain add-certificates
+      - name: Apply signing to Xcode project
         script: |
           xcode-project use-profiles
       - name: Build signed IPA
