@@ -1,6 +1,5 @@
 # Codemagic build configuration — Farooq Music (iOS)
-# Automatic App Store signing. The signing key is stored as a single-line
-# base64 secret (CERTIFICATE_PRIVATE_KEY) and decoded during the build.
+# Builds a signed App Store .ipa and uploads it to TestFlight.
 
 workflows:
   ios-farooq-music:
@@ -11,9 +10,10 @@ workflows:
       app_store_connect: Farooq Music
     environment:
       groups:
-        - farooq_signing      # must contain CERTIFICATE_PRIVATE_KEY (secret, base64)
+        - farooq_signing          # contains CERTIFICATE_PRIVATE_KEY (secret, base64)
       vars:
         BUNDLE_ID: "com.farooqmusic.app"
+        APP_STORE_APPLE_ID: 6784953057
       flutter: stable
       xcode: latest
     scripts:
@@ -40,9 +40,19 @@ workflows:
       - name: Apply signing to Xcode project
         script: |
           xcode-project use-profiles
+      - name: Set build number (one higher than latest on TestFlight)
+        script: |
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" 2>/dev/null || echo 0)
+          NEXT=$(( ${LATEST:-0} + 1 ))
+          echo "Using build number: $NEXT"
+          cd ios && agvtool new-version -all "$NEXT" && cd ..
       - name: Build signed IPA
         script: |
           flutter build ipa --release \
             --export-options-plist=/Users/builder/export_options.plist
     artifacts:
       - build/ios/ipa/*.ipa
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
