@@ -19,16 +19,17 @@ const kBorder  = Color(0x33c77dff);
 class SCTrack {
   final String id, title;
   final String? genre, artworkUrl;
-  final int? duration;
+  final int? duration, plays;
   const SCTrack({required this.id, required this.title,
-    this.genre, this.artworkUrl, this.duration});
+    this.genre, this.artworkUrl, this.duration, this.plays});
   factory SCTrack.fromJson(Map<String, dynamic> j) {
     final art = (j['artwork'] ?? j['artwork_url']) as String?;
     return SCTrack(
       id: j['id'].toString(), title: j['title'] ?? 'Unknown',
       genre: (j['genre'] ?? '') == '' ? null : j['genre'] as String,
       artworkUrl: art,
-      duration: j['duration'] is int ? j['duration'] as int : null);
+      duration: j['duration'] is int ? j['duration'] as int : null,
+      plays: j['plays'] is int ? j['plays'] as int : null);
   }
 }
 
@@ -252,24 +253,80 @@ class MusicTab extends StatefulWidget {
   @override State<MusicTab> createState() => _MusicState();
 }
 class _MusicState extends State<MusicTab> {
-  List<SCTrack> _all = [], _shown = [];
-  bool _loading = true; String? _error;
+  List<SCTrack> _all = [];
+  String _q = '';
+  int _sort = 0;                 // 0 newest, 1 oldest, 2 A-Z, 3 most played
+  bool _loading = true;
+  String? _error;
+
+  static const _sortLabels = ['Newest', 'Oldest', 'A–Z', 'Most played'];
+
   @override void initState() { super.initState(); _load(); }
+
   Future<void> _load() async {
     setState(() { _loading = true; _error = null; });
     try {
       final t = await fetchTracks();
-      setState(() { _all = t; _shown = t; _loading = false; });
+      setState(() { _all = t; _loading = false; });
     } catch (e) { setState(() { _error = e.toString(); _loading = false; }); }
   }
-  void _search(String q) => setState(() =>
-    _shown = q.isEmpty ? _all : _all.where((t) =>
-      t.title.toLowerCase().contains(q.toLowerCase()) ||
-      (t.genre ?? '').toLowerCase().contains(q.toLowerCase())).toList());
+
+  List<SCTrack> get _featured => _all.take(10).toList();
+
+  List<SCTrack> get _mostPlayed {
+    final l = [..._all]..sort((a, b) => (b.plays ?? 0).compareTo(a.plays ?? 0));
+    return l.take(10).toList();
+  }
+
+  List<SCTrack> get _sorted {
+    final l = [..._all];
+    switch (_sort) {
+      case 1: return l.reversed.toList();
+      case 2: l.sort((a, b) =>
+        a.title.toLowerCase().compareTo(b.title.toLowerCase())); return l;
+      case 3: l.sort((a, b) => (b.plays ?? 0).compareTo(a.plays ?? 0)); return l;
+      default: return l;          // newest (API order)
+    }
+  }
+
+  List<SCTrack> get _visible {
+    final base = _sorted;
+    if (_q.isEmpty) return base;
+    final q = _q.toLowerCase();
+    return base.where((t) =>
+      t.title.toLowerCase().contains(q) ||
+      (t.genre ?? '').toLowerCase().contains(q)).toList();
+  }
+
+  Future<void> _playAll({bool shuffle = false}) async {
+    final list = _sorted;
+    if (list.isEmpty) return;
+    isShuffle.value = shuffle;
+    await playQueue(list, 0);
+  }
+
+  String _plays(int? n) {
+    if (n == null) return '';
+    if (n >= 1000) return '${(n / 1000).toStringAsFixed(1)}K plays';
+    return '$n plays';
+  }
+
+  Widget _artPh() => Container(color: kCard,
+    child: const Icon(Icons.music_note, color: kPrimary, size: 40));
+
+  Widget _art(SCTrack t) => ClipRRect(
+    borderRadius: BorderRadius.circular(14),
+    child: SizedBox(width: 150, height: 150,
+      child: t.artworkUrl != null
+        ? Image.network(t.artworkUrl!, fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => _artPh())
+        : _artPh()));
+
   @override
   Widget build(BuildContext context) => Scaffold(backgroundColor: kBg,
     body: SafeArea(child: Column(children: [
-      Container(padding: const EdgeInsets.fromLTRB(18,18,18,10),
+      // ---- Header ----
+      Container(padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
         decoration: const BoxDecoration(gradient: LinearGradient(
           begin: Alignment.topLeft, end: Alignment.bottomRight,
           colors: [Color(0xFF2d1b3d), kBg])),
@@ -282,7 +339,8 @@ class _MusicState extends State<MusicTab> {
           Container(decoration: BoxDecoration(color: kCard,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(color: kBorder)),
-            child: TextField(onChanged: _search,
+            child: TextField(
+              onChanged: (v) => setState(() => _q = v),
               style: const TextStyle(color: kOn),
               decoration: const InputDecoration(
                 hintText: 'Search tracks...',
@@ -290,9 +348,8 @@ class _MusicState extends State<MusicTab> {
                 prefixIcon: Icon(Icons.search, color: kMuted),
                 border: InputBorder.none,
                 contentPadding: EdgeInsets.symmetric(vertical: 12)))),
-          const SizedBox(height: 6),
-          Text(_loading ? 'Loading...' : '${_shown.length} tracks',
-            style: const TextStyle(color: kMuted, fontSize: 12))])),
+        ])),
+      // ---- Body ----
       Expanded(child: _loading
         ? const Center(child: CircularProgressIndicator(color: kPrimary))
         : _error != null
@@ -306,11 +363,123 @@ class _MusicState extends State<MusicTab> {
               ElevatedButton(onPressed: _load,
                 style: ElevatedButton.styleFrom(backgroundColor: kPrimary),
                 child: const Text('Try again'))]))
-          : ListView.builder(padding: const EdgeInsets.only(bottom: 8),
-              itemCount: _shown.length,
-              itemBuilder: (ctx, i) => TrackTile(
-                track: _shown[i],
-                onTap: () => playQueue(_shown, i))))])));
+          : _q.isNotEmpty ? _searchResults() : _home())])));
+
+  // ---------- Search results ----------
+  Widget _searchResults() {
+    final r = _visible;
+    if (r.isEmpty) {
+      return const Center(child: Text('No tracks found',
+        style: TextStyle(color: kMuted)));
+    }
+    return ListView.builder(padding: const EdgeInsets.only(top: 6, bottom: 8),
+      itemCount: r.length,
+      itemBuilder: (_, i) => TrackTile(track: r[i],
+        onTap: () => playQueue(r, i)));
+  }
+
+  // ---------- Home ----------
+  Widget _home() {
+    final feat = _featured;
+    final pop  = _mostPlayed;
+    final all  = _sorted;
+    return CustomScrollView(slivers: [
+      // Play all / Shuffle
+      SliverToBoxAdapter(child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 2),
+        child: Row(children: [
+          Expanded(child: ElevatedButton.icon(
+            onPressed: () => _playAll(shuffle: false),
+            style: ElevatedButton.styleFrom(backgroundColor: kPrimary,
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12))),
+            icon: const Icon(Icons.play_arrow, color: Colors.white),
+            label: const Text('Play all', style: TextStyle(
+              color: Colors.white, fontWeight: FontWeight.w700)))),
+          const SizedBox(width: 10),
+          Expanded(child: OutlinedButton.icon(
+            onPressed: () => _playAll(shuffle: true),
+            style: OutlinedButton.styleFrom(
+              side: const BorderSide(color: kPrimary),
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12))),
+            icon: const Icon(Icons.shuffle, color: kLight),
+            label: const Text('Shuffle', style: TextStyle(
+              color: kLight, fontWeight: FontWeight.w700)))),
+        ]))),
+      _sectionHeader('New Releases'),
+      SliverToBoxAdapter(child: _cardRow(feat, showPlays: false)),
+      _sectionHeader('Most Played'),
+      SliverToBoxAdapter(child: _cardRow(pop, showPlays: true, ranked: true)),
+      // All Tracks header + sort
+      SliverToBoxAdapter(child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 18, 8, 6),
+        child: Row(children: [
+          const Expanded(child: Text('All Tracks', style: TextStyle(
+            color: kOn, fontSize: 17, fontWeight: FontWeight.w800))),
+          PopupMenuButton<int>(
+            color: kCard,
+            initialValue: _sort,
+            onSelected: (v) => setState(() => _sort = v),
+            itemBuilder: (_) => [
+              for (var i = 0; i < _sortLabels.length; i++)
+                PopupMenuItem(value: i, child: Text(_sortLabels[i],
+                  style: const TextStyle(color: kOn)))],
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Text(_sortLabels[_sort], style: const TextStyle(
+                color: kLight, fontSize: 13)),
+              const Icon(Icons.arrow_drop_down, color: kLight)])),
+        ]))),
+      SliverList(delegate: SliverChildBuilderDelegate(
+        (_, i) => TrackTile(track: all[i], onTap: () => playQueue(all, i)),
+        childCount: all.length)),
+      const SliverToBoxAdapter(child: SizedBox(height: 10)),
+    ]);
+  }
+
+  Widget _sectionHeader(String t) => SliverToBoxAdapter(child: Padding(
+    padding: const EdgeInsets.fromLTRB(16, 18, 16, 8),
+    child: Text(t, style: const TextStyle(
+      color: kOn, fontSize: 17, fontWeight: FontWeight.w800))));
+
+  Widget _cardRow(List<SCTrack> list,
+      {bool showPlays = false, bool ranked = false}) => SizedBox(
+    height: showPlays ? 212 : 196,
+    child: ListView.builder(scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      itemCount: list.length,
+      itemBuilder: (_, i) {
+        final t = list[i];
+        return GestureDetector(
+          onTap: () => playQueue(list, i),
+          child: Container(width: 150,
+            margin: const EdgeInsets.symmetric(horizontal: 4),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+              ranked
+                ? Stack(children: [
+                    _art(t),
+                    Positioned(left: 8, top: 8, child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(color: Colors.black54,
+                        borderRadius: BorderRadius.circular(99)),
+                      child: Text('#${i + 1}', style: const TextStyle(
+                        color: kLight, fontSize: 12,
+                        fontWeight: FontWeight.w800)))),
+                  ])
+                : _art(t),
+              const SizedBox(height: 6),
+              Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: kOn, fontSize: 12.5,
+                  fontWeight: FontWeight.w600)),
+              if (showPlays)
+                Text(_plays(t.plays), style: const TextStyle(
+                  color: kMuted, fontSize: 11)),
+            ])));
+      }));
 }
 
 class TrackTile extends StatelessWidget {
