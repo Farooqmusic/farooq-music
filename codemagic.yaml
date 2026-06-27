@@ -1,0 +1,34 @@
+# Codemagic build configuration — Farooq Music (iOS)
+# Produces a signed App Store .ipa using the "Farooq Music" API key
+# already connected in Codemagic (Developer Portal integration).
+
+workflows:
+  ios-farooq-music:
+    name: Farooq Music iOS
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      app_store_connect: Farooq Music
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.farooqmusic.app
+      flutter: stable
+      xcode: latest
+    scripts:
+      - name: Set correct bundle identifier
+        script: |
+          sed -i '' 's/com\.example\.farooqMusic/com.farooqmusic.app/g' \
+            ios/Runner.xcodeproj/project.pbxproj
+      - name: Get Flutter packages
+        script: |
+          flutter pub get
+      - name: Set up code signing
+        script: |
+          xcode-project use-profiles
+      - name: Build signed IPA
+        script: |
+          flutter build ipa --release \
+            --export-options-plist=/Users/builder/export_options.plist
+    artifacts:
+      - build/ios/ipa/*.ipa
