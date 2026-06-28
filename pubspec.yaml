@@ -41,6 +41,11 @@ dependencies:
   share_plus: ^13.1.0
   audio_session: ^0.2.3
   url_launcher: ^6.3.1
+  # ---- Auth (login) ----
+  supabase_flutter: ^2.12.4
+  google_sign_in: ^7.2.0
+  sign_in_with_apple: ^7.0.1
+  crypto: ^3.0.0
 dev_dependencies:
   flutter_test:
     sdk: flutter
