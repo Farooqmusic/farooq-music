@@ -49,16 +49,6 @@ Future<List<SCTrack>> fetchTracks() async {
   throw Exception('HTTP ${r.statusCode}');
 }
 
-Future<String> getStreamUrl(String id) async {
-  final r = await http.get(Uri.parse('$kBaseUrl?action=stream&id=$id'));
-  if (r.statusCode == 200) {
-    final d = json.decode(r.body);
-    if (d['ok'] == true) return d['url'] as String;
-    throw Exception(d['error'] ?? 'Stream error');
-  }
-  throw Exception('HTTP ${r.statusCode}');
-}
-
 final player       = AudioPlayer();
 final currentTrack = ValueNotifier<SCTrack?>(null);
 final isPlaying    = ValueNotifier<bool>(false);
@@ -73,8 +63,12 @@ int _playToken = 0;
 
 String _sigOf(List<SCTrack> ts) => ts.map((t) => t.id).join(',');
 
-AudioSource _sourceFor(SCTrack t, String url) => AudioSource.uri(
-  Uri.parse(url),
+// Each track's source points at mobile.php?action=play&id=X. That endpoint
+// 302-redirects to a FRESH SoundCloud URL on every request, so the player always
+// gets a valid (non-expired) stream — both for the first track and for each
+// auto-advance. No URLs are resolved up front, so playback starts instantly.
+AudioSource _sourceFor(SCTrack t) => AudioSource.uri(
+  Uri.parse('$kBaseUrl?action=play&id=${t.id}'),
   tag: MediaItem(
     id: t.id,
     title: t.title,
@@ -82,21 +76,6 @@ AudioSource _sourceFor(SCTrack t, String url) => AudioSource.uri(
     artUri: t.artworkUrl != null ? Uri.tryParse(t.artworkUrl!) : null,
   ),
 );
-
-// Resolve every track's stream URL, capped at 12 requests in parallel.
-Future<List<String?>> _resolveAll(List<SCTrack> ts, int token) async {
-  final out = List<String?>.filled(ts.length, null);
-  int cursor = 0;
-  Future<void> worker() async {
-    while (true) {
-      final i = cursor++;
-      if (i >= ts.length || token != _playToken) break;
-      try { out[i] = await getStreamUrl(ts[i].id); } catch (_) {}
-    }
-  }
-  await Future.wait(List.generate(12, (_) => worker()));
-  return out;
-}
 
 Future<void> playQueue(List<SCTrack> tracks, int index) async {
   if (tracks.isEmpty) return;
@@ -114,29 +93,15 @@ Future<void> playQueue(List<SCTrack> tracks, int index) async {
   isPreparing.value = true;
   currentTrack.value = tracks[index];        // show tapped track right away
   try {
-    final urls = await _resolveAll(tracks, token);
-    if (token != _playToken) return;
-
-    final sources = <AudioSource>[];
-    final ordered = <SCTrack>[];
-    int startIndex = 0;
-    for (var k = 0; k < tracks.length; k++) {
-      final u = urls[k];
-      if (u != null && u.isNotEmpty) {
-        if (k == index) startIndex = sources.length;
-        sources.add(_sourceFor(tracks[k], u));
-        ordered.add(tracks[k]);
-      }
-    }
-    if (sources.isEmpty) return;
-
-    queue = ordered;
+    // Build all sources directly from the proxy URLs — no up-front resolving.
+    final sources = tracks.map(_sourceFor).toList();
+    queue = [...tracks];
     _playlist = ConcatenatingAudioSource(children: sources);
     _loadedSig = sig;
 
     await player.setLoopMode(isRepeat.value ? LoopMode.one : LoopMode.all);
     await player.setShuffleModeEnabled(isShuffle.value);
-    await player.setAudioSource(_playlist!, initialIndex: startIndex);
+    await player.setAudioSource(_playlist!, initialIndex: index);
     if (token != _playToken) return;
     if (isShuffle.value) await player.shuffle();
     await player.play();
@@ -162,14 +127,14 @@ Future<void> toggleRepeat() async {
   await player.setLoopMode(isRepeat.value ? LoopMode.one : LoopMode.all);
 }
 
-// Re-resolve a single track whose SoundCloud URL expired, then resume it.
+// Safety net: if a track errors mid-playback (rare — e.g. a CDN token expired
+// during a very long pause), rebuild its source so the player re-requests a fresh
+// redirect from mobile.php?action=play, then resume from the start of that track.
 Future<void> _recoverIndex(int i) async {
   if (_playlist == null || i < 0 || i >= queue.length) return;
   try {
-    final fresh = await getStreamUrl(queue[i].id);
-    if (fresh.isEmpty) { player.seekToNext(); return; }
     await _playlist!.removeAt(i);
-    await _playlist!.insert(i, _sourceFor(queue[i], fresh));
+    await _playlist!.insert(i, _sourceFor(queue[i]));
     await player.seek(Duration.zero, index: i);
     await player.play();
   } catch (_) {
