@@ -49,6 +49,36 @@ Future<List<SCTrack>> fetchTracks() async {
   throw Exception('HTTP ${r.statusCode}');
 }
 
+class Album {
+  final String id, title;
+  final String? artworkUrl;
+  final int trackCount;
+  final List<SCTrack> tracks;
+  const Album({required this.id, required this.title, this.artworkUrl,
+    required this.trackCount, required this.tracks});
+  factory Album.fromJson(Map<String, dynamic> j) {
+    final ts = ((j['tracks'] as List?) ?? [])
+      .map((t) => SCTrack.fromJson(t as Map<String, dynamic>)).toList();
+    return Album(
+      id: j['id'].toString(),
+      title: j['title'] ?? 'Album',
+      artworkUrl: (j['artwork'] ?? '') == '' ? null : j['artwork'] as String,
+      trackCount: j['track_count'] is int ? j['track_count'] as int : ts.length,
+      tracks: ts);
+  }
+}
+
+Future<List<Album>> fetchAlbums() async {
+  final r = await http.get(Uri.parse('$kBaseUrl?action=albums'));
+  if (r.statusCode == 200) {
+    final d = json.decode(r.body);
+    if (d['ok'] == true)
+      return (d['albums'] as List).map((a) => Album.fromJson(a)).toList();
+    throw Exception(d['error'] ?? 'API error');
+  }
+  throw Exception('HTTP ${r.statusCode}');
+}
+
 final player       = AudioPlayer();
 final currentTrack = ValueNotifier<SCTrack?>(null);
 final isPlaying    = ValueNotifier<bool>(false);
@@ -241,6 +271,7 @@ class MusicTab extends StatefulWidget {
 }
 class _MusicState extends State<MusicTab> {
   List<SCTrack> _all = [];
+  List<Album> _albums = [];
   String _q = '';
   int _sort = 0;                 // 0 newest, 1 oldest, 2 A-Z, 3 most played, 4 shuffle
   List<SCTrack>? _shuffled;      // stable random order for the Shuffle sort
@@ -257,7 +288,15 @@ class _MusicState extends State<MusicTab> {
     try {
       final t = await fetchTracks();
       setState(() { _all = t; _loading = false; });
-    } catch (e) { setState(() { _error = e.toString(); _loading = false; }); }
+    } catch (e) {
+      setState(() { _error = e.toString(); _loading = false; });
+      return;
+    }
+    // Albums are best-effort: a failure here must not break the music list.
+    try {
+      final a = await fetchAlbums();
+      if (mounted) setState(() { _albums = a; });
+    } catch (_) {}
   }
 
   List<SCTrack> get _featured => _all.take(10).toList();
@@ -401,6 +440,10 @@ class _MusicState extends State<MusicTab> {
         ]))),
       _sectionHeader('New Releases'),
       SliverToBoxAdapter(child: _cardRow(feat, showPlays: false)),
+      if (_albums.isNotEmpty) ...[
+        _sectionHeader('Albums'),
+        SliverToBoxAdapter(child: _albumRow(_albums)),
+      ],
       _sectionHeader('Most Played'),
       SliverToBoxAdapter(child: _cardRow(pop, showPlays: true, ranked: true)),
       // All Tracks header + sort
@@ -436,6 +479,38 @@ class _MusicState extends State<MusicTab> {
     padding: const EdgeInsets.fromLTRB(16, 18, 16, 8),
     child: Text(t, style: const TextStyle(
       color: kOn, fontSize: 17, fontWeight: FontWeight.w800))));
+
+  Widget _albumArt(Album a) => ClipRRect(
+    borderRadius: BorderRadius.circular(14),
+    child: SizedBox(width: 150, height: 150,
+      child: a.artworkUrl != null
+        ? Image.network(a.artworkUrl!, fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => _artPh())
+        : _artPh()));
+
+  Widget _albumRow(List<Album> list) => SizedBox(
+    height: 200,
+    child: ListView.builder(scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      itemCount: list.length,
+      itemBuilder: (_, i) {
+        final a = list[i];
+        return GestureDetector(
+          onTap: () => Navigator.of(context).push(MaterialPageRoute(
+            builder: (_) => AlbumScreen(album: a))),
+          child: Container(width: 150,
+            margin: const EdgeInsets.symmetric(horizontal: 4),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+              _albumArt(a),
+              const SizedBox(height: 6),
+              Text(a.title, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: kOn, fontSize: 12.5,
+                  fontWeight: FontWeight.w600)),
+              Text('${a.trackCount} tracks', style: const TextStyle(
+                color: kMuted, fontSize: 11)),
+            ])));
+      }));
 
   Widget _cardRow(List<SCTrack> list,
       {bool showPlays = false, bool ranked = false}) => SizedBox(
@@ -521,6 +596,95 @@ class TrackTile extends StatelessWidget {
         const Icon(Icons.play_circle, color:kPrimary, size:32)])));
   Widget _ph() => Container(width:52, height:52, color:kBg,
     child: const Icon(Icons.music_note, color:kPrimary));
+}
+
+class AlbumScreen extends StatelessWidget {
+  final Album album;
+  const AlbumScreen({super.key, required this.album});
+
+  // Upgrade SoundCloud artwork to a crisp t500x500 where possible.
+  String _hiRes(String url) => url.replaceAll('-t300x300.', '-t500x500.');
+
+  Future<void> _play({bool shuffle = false}) async {
+    if (album.tracks.isEmpty) return;
+    isShuffle.value = shuffle;
+    await playQueue(album.tracks, 0);
+  }
+
+  Widget _cover(double side) {
+    final url = album.artworkUrl;
+    Widget ph() => Container(color: kCard,
+      child: Icon(Icons.album, color: kPrimary, size: side * 0.3));
+    return Container(width: side, height: side,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: [BoxShadow(color: kPrimary.withOpacity(0.35),
+          blurRadius: 34, spreadRadius: 3)]),
+      child: ClipRRect(borderRadius: BorderRadius.circular(18),
+        child: url == null ? ph()
+          : Image.network(_hiRes(url), width: side, height: side,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => Image.network(url,
+                width: side, height: side, fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => ph()))));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final side = (MediaQuery.of(context).size.width - 120)
+      .clamp(180.0, 260.0).toDouble();
+    return Scaffold(
+      backgroundColor: kBg,
+      appBar: AppBar(backgroundColor: kBg, elevation: 0,
+        iconTheme: const IconThemeData(color: kOn),
+        title: Text(album.title, maxLines: 1, overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: kOn, fontSize: 16,
+            fontWeight: FontWeight.w700))),
+      bottomNavigationBar: const MiniPlayer(),
+      body: CustomScrollView(slivers: [
+        SliverToBoxAdapter(child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 8, 18, 4),
+          child: Column(children: [
+            Center(child: _cover(side)),
+            const SizedBox(height: 18),
+            Text(album.title, textAlign: TextAlign.center,
+              style: const TextStyle(color: kOn, fontSize: 20,
+                fontWeight: FontWeight.w900)),
+            const SizedBox(height: 4),
+            Text('Album · ${album.tracks.length} tracks',
+              style: const TextStyle(color: kMuted, fontSize: 13)),
+            const SizedBox(height: 16),
+            Row(children: [
+              Expanded(child: ElevatedButton.icon(
+                onPressed: () => _play(shuffle: false),
+                style: ElevatedButton.styleFrom(backgroundColor: kPrimary,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12))),
+                icon: const Icon(Icons.play_arrow, color: Colors.white),
+                label: const Text('Play all', style: TextStyle(
+                  color: Colors.white, fontWeight: FontWeight.w700)))),
+              const SizedBox(width: 10),
+              Expanded(child: OutlinedButton.icon(
+                onPressed: () => _play(shuffle: true),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: kPrimary),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12))),
+                icon: const Icon(Icons.shuffle, color: kLight),
+                label: const Text('Shuffle', style: TextStyle(
+                  color: kLight, fontWeight: FontWeight.w700)))),
+            ]),
+            const SizedBox(height: 8),
+          ]))),
+        SliverList(delegate: SliverChildBuilderDelegate(
+          (_, i) => TrackTile(track: album.tracks[i],
+            onTap: () => playQueue(album.tracks, i)),
+          childCount: album.tracks.length)),
+        const SliverToBoxAdapter(child: SizedBox(height: 10)),
+      ]));
+  }
 }
 
 class MiniPlayer extends StatelessWidget {
