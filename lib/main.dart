@@ -7,6 +7,10 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:just_audio_background/just_audio_background.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+import 'package:crypto/crypto.dart';
 
 const kBaseUrl = 'https://farooqmusic.com/mobile.php';
 const kBg      = Color(0xFF1a0e22);
@@ -16,6 +20,33 @@ const kLight   = Color(0xFFc77dff);
 const kOn      = Color(0xFFefe7f5);
 const kMuted   = Color(0xFFb39fc4);
 const kBorder  = Color(0x33c77dff);
+
+// ---- Auth / Supabase config ----
+// The Supabase URL + publishable key are SAFE to ship inside the app — the
+// publishable (anon) key is designed to live in client code. The same Supabase
+// project is shared with Farooq Stars, so logging in here gives one account
+// across both apps (for the future merged app).
+const kSupabaseUrl       = 'https://yxrntgugocmhphkoibnp.supabase.co';
+const kSupabaseKey       = 'sb_publishable_zyo6ulAr1J5BpX-7OEUHMg_RuAL1ONt';
+// Google OAuth client IDs (public). iOS client = the app itself;
+// web client = the "server" client Supabase verifies tokens against.
+const kGoogleIosClientId =
+  '557736899895-ad5169jo7cdmig54cd9nc7ova9fhuqg5.apps.googleusercontent.com';
+const kGoogleWebClientId =
+  '557736899895-oi900uac66s4j074p9nus93ovkgo860t.apps.googleusercontent.com';
+
+// Handy Supabase client accessor (valid after Supabase.initialize in main()).
+SupabaseClient get supabase => Supabase.instance.client;
+
+// The currently logged-in user (null = guest). The whole UI listens to this.
+final authUser = ValueNotifier<User?>(null);
+
+// Pretty display name for a user: metadata name -> email -> fallback.
+String displayName(User u) {
+  final n = u.userMetadata?['full_name'] ?? u.userMetadata?['name'];
+  if (n is String && n.trim().isNotEmpty) return n.trim();
+  return u.email ?? 'Farooq Music listener';
+}
 
 class SCTrack {
   final String id, title;
@@ -189,8 +220,89 @@ String fmtPlays(int? n) {
   return '$n plays';
 }
 
+// ---------------------------------------------------------------------------
+// Authentication helpers (Supabase + native Google / Apple)
+// ---------------------------------------------------------------------------
+
+// Native Google sign-in: get an ID token from Google, hand it to Supabase.
+Future<void> signInWithGoogle() async {
+  final google = GoogleSignIn.instance;
+  // Opens the native Google account picker.
+  final account = await google.authenticate();
+  final idToken = account.authentication.idToken;
+  if (idToken == null) {
+    throw const AuthException('No Google ID token returned.');
+  }
+  // Access token is optional for Supabase; fetch it best-effort.
+  String? accessToken;
+  try {
+    final authz =
+      await account.authorizationClient.authorizationForScopes(const []);
+    accessToken = authz?.accessToken;
+  } catch (_) {}
+  await supabase.auth.signInWithIdToken(
+    provider: OAuthProvider.google,
+    idToken: idToken,
+    accessToken: accessToken,
+  );
+}
+
+// Native Apple sign-in (iOS): nonce-protected ID token -> Supabase.
+Future<void> signInWithApple() async {
+  final rawNonce = supabase.auth.generateRawNonce();
+  final hashedNonce = sha256.convert(utf8.encode(rawNonce)).toString();
+  final credential = await SignInWithApple.getAppleIDCredential(
+    scopes: const [
+      AppleIDAuthorizationScopes.email,
+      AppleIDAuthorizationScopes.fullName,
+    ],
+    nonce: hashedNonce,
+  );
+  final idToken = credential.identityToken;
+  if (idToken == null) {
+    throw const AuthException('No Apple ID token returned.');
+  }
+  await supabase.auth.signInWithIdToken(
+    provider: OAuthProvider.apple,
+    idToken: idToken,
+    nonce: rawNonce,
+  );
+  // Apple only sends the name on the FIRST sign-in — persist it right away.
+  final name = [credential.givenName, credential.familyName]
+    .where((e) => e != null && e!.trim().isNotEmpty)
+    .map((e) => e!.trim())
+    .join(' ')
+    .trim();
+  if (name.isNotEmpty) {
+    try {
+      await supabase.auth.updateUser(UserAttributes(data: {'full_name': name}));
+    } catch (_) {}
+  }
+}
+
+Future<void> signOutUser() async {
+  try { await GoogleSignIn.instance.signOut(); } catch (_) {}
+  await supabase.auth.signOut();
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // ---- Supabase (auth + shared backend with Farooq Stars) ----
+  await Supabase.initialize(url: kSupabaseUrl, publishableKey: kSupabaseKey);
+  authUser.value = supabase.auth.currentUser;
+  supabase.auth.onAuthStateChange.listen((data) {
+    authUser.value = data.session?.user;
+  });
+
+  // ---- Native Google sign-in (initialise once) ----
+  try {
+    await GoogleSignIn.instance.initialize(
+      clientId: kGoogleIosClientId,
+      serverClientId: kGoogleWebClientId,
+    );
+  } catch (_) {}
+
   await JustAudioBackground.init(
     androidNotificationChannelId: 'com.farooqmusic.app.channel.audio',
     androidNotificationChannelName: 'Farooq Music',
@@ -360,10 +472,17 @@ class _MusicState extends State<MusicTab> {
           begin: Alignment.topLeft, end: Alignment.bottomRight,
           colors: [Color(0xFF2d1b3d), kBg])),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Farooq Music', style: TextStyle(
-            color: kLight, fontSize: 26, fontWeight: FontWeight.w900)),
-          const Text('Mohammad Farooq · AI Music',
-            style: TextStyle(color: kMuted, fontSize: 12)),
+          Row(children: [
+            Expanded(child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: const [
+              Text('Farooq Music', style: TextStyle(
+                color: kLight, fontSize: 26, fontWeight: FontWeight.w900)),
+              Text('Mohammad Farooq · AI Music',
+                style: TextStyle(color: kMuted, fontSize: 12)),
+            ])),
+            const AccountButton(),
+          ]),
           const SizedBox(height: 12),
           Container(decoration: BoxDecoration(color: kCard,
             borderRadius: BorderRadius.circular(12),
@@ -1077,4 +1196,205 @@ class AboutTab extends StatelessWidget {
         Center(child: Text('Made with Suno AI · © Farooq Music',
           style: TextStyle(color: kMuted.withOpacity(0.7), fontSize: 11))),
       ])));
+}
+// ===========================================================================
+// Account: avatar button in the Music header + full Account screen
+// ===========================================================================
+
+class AccountButton extends StatelessWidget {
+  const AccountButton({super.key});
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<User?>(
+    valueListenable: authUser,
+    builder: (_, user, __) => GestureDetector(
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const AccountScreen())),
+      child: Container(
+        width: 44, height: 44,
+        decoration: BoxDecoration(
+          color: kCard, shape: BoxShape.circle,
+          border: Border.all(
+            color: user == null ? kBorder : kPrimary, width: 1.5)),
+        child: Icon(
+          user == null ? Icons.person_outline : Icons.person,
+          color: user == null ? kMuted : kLight, size: 24),
+      )));
+}
+
+class AccountScreen extends StatefulWidget {
+  const AccountScreen({super.key});
+  @override
+  State<AccountScreen> createState() => _AccountScreenState();
+}
+
+class _AccountScreenState extends State<AccountScreen> {
+  bool _busy = false;
+
+  Future<void> _run(Future<void> Function() action,
+      {required String failMsg, String? successMsg}) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await action();
+      if (successMsg != null) _snack(successMsg);
+    } on AuthException catch (e) {
+      _snack('$failMsg: ${e.message}');
+    } on SignInWithAppleAuthorizationException catch (e) {
+      // User tapping "Cancel" on the Apple sheet is not an error.
+      if (e.code != AuthorizationErrorCode.canceled) _snack(failMsg);
+    } catch (e) {
+      // Covers a cancelled Google sheet and any other failure.
+      final s = e.toString().toLowerCase();
+      if (!s.contains('cancel')) _snack(failMsg);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg, style: const TextStyle(color: kOn)),
+      backgroundColor: kCard, behavior: SnackBarBehavior.floating));
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: kBg,
+    appBar: AppBar(backgroundColor: kBg, elevation: 0,
+      iconTheme: const IconThemeData(color: kOn),
+      title: const Text('Account', style: TextStyle(
+        color: kOn, fontSize: 17, fontWeight: FontWeight.w800))),
+    body: ValueListenableBuilder<User?>(
+      valueListenable: authUser,
+      builder: (_, user, __) =>
+        user == null ? _signedOut() : _signedIn(user)));
+
+  // ---------- Signed-out: show the sign-in options ----------
+  Widget _signedOut() => ListView(
+    padding: const EdgeInsets.fromLTRB(22, 28, 22, 28),
+    children: [
+      Center(child: Container(
+        width: 92, height: 92,
+        decoration: BoxDecoration(shape: BoxShape.circle,
+          boxShadow: [BoxShadow(color: kPrimary.withOpacity(0.4),
+            blurRadius: 28, spreadRadius: 2)]),
+        child: ClipOval(child: Image.network(
+          'https://farooqmusic.com/farooq-logo.png', fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => Container(color: kCard,
+            child: const Icon(Icons.music_note, color: kPrimary, size: 38)))))),
+      const SizedBox(height: 18),
+      const Text('Sign in to Farooq Music', textAlign: TextAlign.center,
+        style: TextStyle(color: kOn, fontSize: 20, fontWeight: FontWeight.w900)),
+      const SizedBox(height: 8),
+      const Text(
+        'Create your own playlists and save music for offline listening. '
+        'Those features are coming next — sign in now so your account is ready.',
+        textAlign: TextAlign.center,
+        style: TextStyle(color: kMuted, fontSize: 13, height: 1.5)),
+      const SizedBox(height: 28),
+      // Apple first (kept at least as prominent as Google, per App Store rules).
+      _authButton(
+        bg: Colors.black, fg: Colors.white,
+        icon: const Icon(Icons.apple, color: Colors.white, size: 24),
+        label: 'Sign in with Apple',
+        onTap: () => _run(signInWithApple,
+          failMsg: 'Apple sign-in failed', successMsg: 'Signed in')),
+      const SizedBox(height: 12),
+      _authButton(
+        bg: Colors.white, fg: const Color(0xFF1f1f1f),
+        icon: _googleG(),
+        label: 'Sign in with Google',
+        onTap: () => _run(signInWithGoogle,
+          failMsg: 'Google sign-in failed', successMsg: 'Signed in')),
+      const SizedBox(height: 22),
+      if (_busy)
+        const Center(child: SizedBox(width: 26, height: 26,
+          child: CircularProgressIndicator(strokeWidth: 2.6, color: kPrimary))),
+      const SizedBox(height: 10),
+      const Text('Guests can keep listening freely — sign-in is only needed '
+        'for playlists and downloads.', textAlign: TextAlign.center,
+        style: TextStyle(color: kMuted, fontSize: 11, height: 1.5)),
+    ]);
+
+  // ---------- Signed-in: profile + sign out ----------
+  Widget _signedIn(User user) {
+    final name = displayName(user);
+    final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
+    final email = user.email;
+    final provider = user.appMetadata['provider'];
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(22, 28, 22, 28),
+      children: [
+        Center(child: Container(
+          width: 92, height: 92, alignment: Alignment.center,
+          decoration: BoxDecoration(shape: BoxShape.circle, color: kCard,
+            border: Border.all(color: kPrimary, width: 2),
+            boxShadow: [BoxShadow(color: kPrimary.withOpacity(0.35),
+              blurRadius: 24, spreadRadius: 1)]),
+          child: Text(initial, style: const TextStyle(
+            color: kLight, fontSize: 38, fontWeight: FontWeight.w900)))),
+        const SizedBox(height: 16),
+        Text(name, textAlign: TextAlign.center, style: const TextStyle(
+          color: kOn, fontSize: 19, fontWeight: FontWeight.w800)),
+        if (email != null) ...[
+          const SizedBox(height: 4),
+          Text(email, textAlign: TextAlign.center,
+            style: const TextStyle(color: kMuted, fontSize: 13)),
+        ],
+        const SizedBox(height: 10),
+        Center(child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+          decoration: BoxDecoration(color: kPrimary.withOpacity(0.18),
+            borderRadius: BorderRadius.circular(99)),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.verified_user, color: kLight, size: 14),
+            const SizedBox(width: 6),
+            Text(
+              provider is String && provider.isNotEmpty
+                ? 'Signed in with ${provider[0].toUpperCase()}${provider.substring(1)}'
+                : 'Signed in',
+              style: const TextStyle(color: kLight, fontSize: 12,
+                fontWeight: FontWeight.w600)),
+          ]))),
+        const SizedBox(height: 30),
+        OutlinedButton.icon(
+          onPressed: _busy ? null : () => _run(signOutUser,
+            failMsg: 'Sign out failed', successMsg: 'Signed out'),
+          style: OutlinedButton.styleFrom(
+            side: const BorderSide(color: kBorder),
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12))),
+          icon: const Icon(Icons.logout, color: kMuted, size: 20),
+          label: const Text('Sign out',
+            style: TextStyle(color: kOn, fontWeight: FontWeight.w700))),
+        const SizedBox(height: 18),
+        if (_busy)
+          const Center(child: SizedBox(width: 24, height: 24,
+            child: CircularProgressIndicator(strokeWidth: 2.4, color: kPrimary))),
+      ]);
+  }
+
+  Widget _authButton({required Color bg, required Color fg,
+      required Widget icon, required String label,
+      required VoidCallback onTap}) =>
+    Opacity(opacity: _busy ? 0.6 : 1, child: Material(
+      color: bg, borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: _busy ? null : onTap,
+        child: Container(height: 54, alignment: Alignment.center,
+          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            icon, const SizedBox(width: 12),
+            Text(label, style: TextStyle(color: fg, fontSize: 16,
+              fontWeight: FontWeight.w600)),
+          ])))));
+
+  // A simple multi-colour Google "G" so we don't need an image asset.
+  Widget _googleG() => Container(
+    width: 24, height: 24, alignment: Alignment.center,
+    child: const Text('G', style: TextStyle(
+      color: Color(0xFF4285F4), fontSize: 20, fontWeight: FontWeight.w800,
+      fontFamily: 'Roboto')));
 }
