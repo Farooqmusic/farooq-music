@@ -11,6 +11,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:crypto/crypto.dart';
+import 'package:image_picker/image_picker.dart';
+import 'dart:typed_data';
 
 const kBaseUrl = 'https://farooqmusic.com/mobile.php';
 const kBg      = Color(0xFF1a0e22);
@@ -46,6 +48,63 @@ String displayName(User u) {
   final n = u.userMetadata?['full_name'] ?? u.userMetadata?['name'];
   if (n is String && n.trim().isNotEmpty) return n.trim();
   return u.email ?? 'Farooq Music listener';
+}
+
+// ---------- Profile photo (avatar) ----------
+// The current user's avatar URL (null = no photo). The UI listens to this so
+// the picture updates instantly everywhere after a change.
+final avatarUrl = ValueNotifier<String?>(null);
+final _avatarPicker = ImagePicker();
+
+// Load the saved avatar URL for the logged-in user from the `profiles` table.
+Future<void> loadAvatarUrl() async {
+  final user = supabase.auth.currentUser;
+  if (user == null) { avatarUrl.value = null; return; }
+  try {
+    final row = await supabase
+        .from('profiles').select('avatar_url').eq('id', user.id).maybeSingle();
+    final url = row?['avatar_url'];
+    avatarUrl.value = (url is String && url.isNotEmpty) ? url : null;
+  } catch (_) {/* keep whatever we had */}
+}
+
+// Pick a photo, shrink + compress it, upload to Supabase Storage, and save the
+// URL on the user's profile row. Returns true on success, false if cancelled.
+Future<bool> pickAndUploadAvatar(ImageSource source) async {
+  final user = supabase.auth.currentUser;
+  if (user == null) return false;
+  final XFile? picked = await _avatarPicker.pickImage(
+    source: source, maxWidth: 256, maxHeight: 256, imageQuality: 80);
+  if (picked == null) return false; // user cancelled the picker
+  final Uint8List bytes = await picked.readAsBytes();
+  final path = '${user.id}/avatar.jpg';
+  await supabase.storage.from('avatars').uploadBinary(
+    path, bytes,
+    fileOptions: const FileOptions(upsert: true, contentType: 'image/jpeg'));
+  final base = supabase.storage.from('avatars').getPublicUrl(path);
+  // Same filename each time, so add a cache-buster to force the new image.
+  final url = '$base?v=${DateTime.now().millisecondsSinceEpoch}';
+  await supabase.from('profiles').upsert({
+    'id': user.id,
+    'avatar_url': url,
+    'updated_at': DateTime.now().toIso8601String(),
+  });
+  avatarUrl.value = url;
+  return true;
+}
+
+// Remove the current photo (storage object + profile field).
+Future<void> removeAvatar() async {
+  final user = supabase.auth.currentUser;
+  if (user == null) return;
+  try { await supabase.storage.from('avatars').remove(['${user.id}/avatar.jpg']); }
+  catch (_) {}
+  await supabase.from('profiles').upsert({
+    'id': user.id,
+    'avatar_url': null,
+    'updated_at': DateTime.now().toIso8601String(),
+  });
+  avatarUrl.value = null;
 }
 
 class SCTrack {
@@ -291,8 +350,10 @@ void main() async {
   // ---- Supabase (auth + shared backend with Farooq Stars) ----
   await Supabase.initialize(url: kSupabaseUrl, publishableKey: kSupabaseKey);
   authUser.value = supabase.auth.currentUser;
+  loadAvatarUrl();
   supabase.auth.onAuthStateChange.listen((data) {
     authUser.value = data.session?.user;
+    loadAvatarUrl();
   });
 
   // ---- Native Google sign-in (initialise once) ----
@@ -1215,9 +1276,14 @@ class AccountButton extends StatelessWidget {
           color: kCard, shape: BoxShape.circle,
           border: Border.all(
             color: user == null ? kBorder : kPrimary, width: 1.5)),
-        child: Icon(
-          user == null ? Icons.person_outline : Icons.person,
-          color: user == null ? kMuted : kLight, size: 24),
+        child: ClipOval(child: ValueListenableBuilder<String?>(
+          valueListenable: avatarUrl,
+          builder: (_, url, __) => (user != null && url != null)
+            ? Image.network(url, width: 44, height: 44, fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => const Icon(
+                  Icons.person, color: kLight, size: 24))
+            : Icon(user == null ? Icons.person_outline : Icons.person,
+                color: user == null ? kMuted : kLight, size: 24))),
       )));
 }
 
@@ -1326,14 +1392,34 @@ class _AccountScreenState extends State<AccountScreen> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(22, 28, 22, 28),
       children: [
-        Center(child: Container(
-          width: 92, height: 92, alignment: Alignment.center,
-          decoration: BoxDecoration(shape: BoxShape.circle, color: kCard,
-            border: Border.all(color: kPrimary, width: 2),
-            boxShadow: [BoxShadow(color: kPrimary.withOpacity(0.35),
-              blurRadius: 24, spreadRadius: 1)]),
-          child: Text(initial, style: const TextStyle(
-            color: kLight, fontSize: 38, fontWeight: FontWeight.w900)))),
+        Center(child: Opacity(
+          opacity: _busy ? 0.6 : 1,
+          child: GestureDetector(
+            onTap: _busy
+              ? null
+              : () => _changePhoto(hasPhoto: avatarUrl.value != null),
+            child: ValueListenableBuilder<String?>(
+              valueListenable: avatarUrl,
+              builder: (_, url, __) => Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Container(
+                    width: 92, height: 92, alignment: Alignment.center,
+                    decoration: BoxDecoration(shape: BoxShape.circle, color: kCard,
+                      border: Border.all(color: kPrimary, width: 2),
+                      boxShadow: [BoxShadow(color: kPrimary.withOpacity(0.35),
+                        blurRadius: 24, spreadRadius: 1)]),
+                    child: ClipOval(child: (url != null)
+                      ? Image.network(url, width: 92, height: 92, fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => _initialCircle(initial))
+                      : _initialCircle(initial))),
+                  Positioned(right: -2, bottom: -2, child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(color: kPrimary, shape: BoxShape.circle,
+                      border: Border.all(color: kBg, width: 2)),
+                    child: const Icon(Icons.camera_alt,
+                      color: Colors.white, size: 15))),
+                ]))))),
         const SizedBox(height: 16),
         Text(name, textAlign: TextAlign.center, style: const TextStyle(
           color: kOn, fontSize: 19, fontWeight: FontWeight.w800)),
@@ -1357,6 +1443,14 @@ class _AccountScreenState extends State<AccountScreen> {
               style: const TextStyle(color: kLight, fontSize: 12,
                 fontWeight: FontWeight.w600)),
           ]))),
+        const SizedBox(height: 14),
+        Center(child: TextButton.icon(
+          onPressed: _busy
+            ? null
+            : () => _changePhoto(hasPhoto: avatarUrl.value != null),
+          icon: const Icon(Icons.photo_camera_outlined, color: kLight, size: 18),
+          label: const Text('Change photo', style: TextStyle(
+            color: kLight, fontWeight: FontWeight.w700)))),
         const SizedBox(height: 30),
         OutlinedButton.icon(
           onPressed: _busy ? null : () => _run(signOutUser,
@@ -1397,4 +1491,62 @@ class _AccountScreenState extends State<AccountScreen> {
     child: const Text('G', style: TextStyle(
       color: Color(0xFF4285F4), fontSize: 20, fontWeight: FontWeight.w800,
       fontFamily: 'Roboto')));
+
+  // The fallback circle showing the user's first initial (no photo set).
+  Widget _initialCircle(String initial) => Container(
+    width: 92, height: 92, alignment: Alignment.center, color: kCard,
+    child: Text(initial, style: const TextStyle(
+      color: kLight, fontSize: 38, fontWeight: FontWeight.w900)));
+
+  // Bottom sheet: choose gallery / camera (and remove, if a photo exists),
+  // then upload and update the avatar.
+  Future<void> _changePhoto({required bool hasPhoto}) async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: kCard,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (ctx) => SafeArea(child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 10),
+          Container(width: 40, height: 4, decoration: BoxDecoration(
+            color: kBorder, borderRadius: BorderRadius.circular(99))),
+          const SizedBox(height: 6),
+          ListTile(
+            leading: const Icon(Icons.photo_library_outlined, color: kLight),
+            title: const Text('Choose from gallery',
+              style: TextStyle(color: kOn, fontWeight: FontWeight.w600)),
+            onTap: () => Navigator.pop(ctx, 'gallery')),
+          ListTile(
+            leading: const Icon(Icons.camera_alt_outlined, color: kLight),
+            title: const Text('Take a photo',
+              style: TextStyle(color: kOn, fontWeight: FontWeight.w600)),
+            onTap: () => Navigator.pop(ctx, 'camera')),
+          if (hasPhoto)
+            ListTile(
+              leading: const Icon(Icons.delete_outline, color: Color(0xFFff6b6b)),
+              title: const Text('Remove photo',
+                style: TextStyle(color: Color(0xFFff6b6b),
+                  fontWeight: FontWeight.w600)),
+              onTap: () => Navigator.pop(ctx, 'remove')),
+          const SizedBox(height: 8),
+        ])));
+    if (choice == null || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      if (choice == 'remove') {
+        await removeAvatar();
+        _snack('Photo removed');
+      } else {
+        final ok = await pickAndUploadAvatar(
+          choice == 'camera' ? ImageSource.camera : ImageSource.gallery);
+        if (ok) _snack('Photo updated');
+      }
+    } catch (_) {
+      _snack('Could not update photo');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
 }
