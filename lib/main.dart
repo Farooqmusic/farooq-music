@@ -124,10 +124,10 @@ Future<void> removeAvatar() async {
 
 class SCTrack {
   final String id, title;
-  final String? genre, artworkUrl, lyrics, explanation;
+  final String? genre, artworkUrl, bannerUrl, lyrics, explanation;
   final int? duration, plays;
   const SCTrack({required this.id, required this.title,
-    this.genre, this.artworkUrl, this.duration, this.plays,
+    this.genre, this.artworkUrl, this.bannerUrl, this.duration, this.plays,
     this.lyrics, this.explanation});
   factory SCTrack.fromJson(Map<String, dynamic> j) {
     final art = (j['artwork'] ?? j['artwork_url']) as String?;
@@ -136,6 +136,7 @@ class SCTrack {
       id: j['id'].toString(), title: j['title'] ?? 'Unknown',
       genre: (j['genre'] ?? '') == '' ? null : j['genre'] as String,
       artworkUrl: art,
+      bannerUrl: str(j['banner']),
       duration: j['duration'] is int ? j['duration'] as int : null,
       plays: j['plays'] is int ? j['plays'] as int : null,
       lyrics: str(j['lyrics']),
@@ -153,12 +154,6 @@ Future<List<SCTrack>> fetchTracks() async {
   }
   throw Exception('HTTP ${r.statusCode}');
 }
-
-// SoundCloud serves the square crop as ...-t300x300.png (or -t500x500 etc.).
-// The original upload keeps its full, wide aspect ratio at ...-original.jpg.
-// The Featured banner wants the wide one.
-String _originalArt(String url) =>
-  url.replaceFirst(RegExp(r'-t\d+x\d+\.(png|jpe?g)$'), '-original.jpg');
 
 class Album {
   final String id, title;
@@ -651,14 +646,15 @@ class _MusicState extends State<MusicTab> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(18),
                   child: Stack(fit: StackFit.expand, children: [
-                    (t.artworkUrl != null)
-                      ? Image.network(_originalArt(t.artworkUrl!),
+                    (t.bannerUrl ?? t.artworkUrl) == null
+                      ? const ColoredBox(color: kCard)
+                      : Image.network((t.bannerUrl ?? t.artworkUrl)!,
                           fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) => Image.network(
-                            t.artworkUrl!, fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) =>
-                              const ColoredBox(color: kCard)))
-                      : const ColoredBox(color: kCard),
+                          errorBuilder: (_, __, ___) => (t.artworkUrl != null)
+                            ? Image.network(t.artworkUrl!, fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) =>
+                                  const ColoredBox(color: kCard))
+                            : const ColoredBox(color: kCard)),
                     const DecoratedBox(decoration: BoxDecoration(
                       gradient: LinearGradient(
                         begin: Alignment.topCenter,
