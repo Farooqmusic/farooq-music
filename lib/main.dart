@@ -154,6 +154,12 @@ Future<List<SCTrack>> fetchTracks() async {
   throw Exception('HTTP ${r.statusCode}');
 }
 
+// SoundCloud serves the square crop as ...-t300x300.png (or -t500x500 etc.).
+// The original upload keeps its full, wide aspect ratio at ...-original.jpg.
+// The Featured banner wants the wide one.
+String _originalArt(String url) =>
+  url.replaceFirst(RegExp(r'-t\d+x\d+\.(png|jpe?g)$'), '-original.jpg');
+
 class Album {
   final String id, title;
   final String? artworkUrl;
@@ -646,9 +652,12 @@ class _MusicState extends State<MusicTab> {
                   borderRadius: BorderRadius.circular(18),
                   child: Stack(fit: StackFit.expand, children: [
                     (t.artworkUrl != null)
-                      ? Image.network(t.artworkUrl!, fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) =>
-                            const ColoredBox(color: kCard))
+                      ? Image.network(_originalArt(t.artworkUrl!),
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Image.network(
+                            t.artworkUrl!, fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) =>
+                              const ColoredBox(color: kCard)))
                       : const ColoredBox(color: kCard),
                     const DecoratedBox(decoration: BoxDecoration(
                       gradient: LinearGradient(
