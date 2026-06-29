@@ -13,6 +13,7 @@ import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:crypto/crypto.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:typed_data';
+import 'dart:math';
 
 const kBaseUrl = 'https://farooqmusic.com/mobile.php';
 const kBg      = Color(0xFF1a0e22);
@@ -465,10 +466,16 @@ class _MusicState extends State<MusicTab> {
   bool _loading = true;
   String? _error;
 
+  // Featured banner (daily-random, swipeable)
+  final _bannerCtrl = PageController(viewportFraction: 0.92);
+  int _bannerPage = 0;
+
   static const _sortLabels =
     ['Newest', 'Oldest', 'A–Z', 'Most played', 'Shuffle'];
 
   @override void initState() { super.initState(); _load(); }
+
+  @override void dispose() { _bannerCtrl.dispose(); super.dispose(); }
 
   Future<void> _load() async {
     setState(() { _loading = true; _error = null; });
@@ -487,6 +494,17 @@ class _MusicState extends State<MusicTab> {
   }
 
   List<SCTrack> get _featured => _all.take(10).toList();
+
+  // A new random selection each day (stable within the day); only tracks
+  // that have artwork, so the banner always looks good.
+  List<SCTrack> get _bannerTracks {
+    final withArt = _all.where((t) => t.artworkUrl != null).toList();
+    if (withArt.isEmpty) return const [];
+    final now = DateTime.now();
+    final doy = now.difference(DateTime(now.year, 1, 1)).inDays;
+    withArt.shuffle(Random(now.year * 1000 + doy));
+    return withArt.take(8).toList();
+  }
 
   List<SCTrack> get _mostPlayed {
     final l = [..._all]..sort((a, b) => (b.plays ?? 0).compareTo(a.plays ?? 0));
@@ -607,12 +625,82 @@ class _MusicState extends State<MusicTab> {
         onTap: () => playQueue(r, i)));
   }
 
+  // ---------- Featured banner ----------
+  Widget _featuredBanner() {
+    final list = _bannerTracks;
+    if (list.isEmpty) return const SliverToBoxAdapter(child: SizedBox.shrink());
+    return SliverToBoxAdapter(child: Padding(
+      padding: const EdgeInsets.only(top: 12, bottom: 2),
+      child: Column(children: [
+        SizedBox(height: 196, child: PageView.builder(
+          controller: _bannerCtrl,
+          itemCount: list.length,
+          onPageChanged: (i) => setState(() => _bannerPage = i),
+          itemBuilder: (_, i) {
+            final t = list[i];
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              child: GestureDetector(
+                onTap: () => playQueue(list, i),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(18),
+                  child: Stack(fit: StackFit.expand, children: [
+                    (t.artworkUrl != null)
+                      ? Image.network(t.artworkUrl!, fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) =>
+                            const ColoredBox(color: kCard))
+                      : const ColoredBox(color: kCard),
+                    const DecoratedBox(decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [Colors.transparent, Color(0xD9000000)]))),
+                    Positioned(right: 14, top: 14, child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: kPrimary.withOpacity(0.92),
+                        shape: BoxShape.circle),
+                      child: const Icon(Icons.play_arrow,
+                        color: Colors.white, size: 22))),
+                    Positioned(left: 16, right: 16, bottom: 14,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text('FEATURED', style: TextStyle(
+                            color: kLight, fontSize: 11,
+                            fontWeight: FontWeight.w700, letterSpacing: 1.5)),
+                          const SizedBox(height: 3),
+                          Text(t.title, maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(color: Colors.white,
+                              fontSize: 19, fontWeight: FontWeight.w900,
+                              height: 1.1)),
+                        ])),
+                  ]),
+                ),
+              ),
+            );
+          })),
+        const SizedBox(height: 8),
+        Row(mainAxisAlignment: MainAxisAlignment.center,
+          children: List.generate(list.length, (i) => AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            margin: const EdgeInsets.symmetric(horizontal: 3),
+            width: i == _bannerPage ? 18 : 6, height: 6,
+            decoration: BoxDecoration(
+              color: i == _bannerPage ? kPrimary : kBorder,
+              borderRadius: BorderRadius.circular(99))))),
+      ])));
+  }
+
   // ---------- Home ----------
   Widget _home() {
     final feat = _featured;
     final pop  = _mostPlayed;
     final all  = _sorted;
     return CustomScrollView(slivers: [
+      _featuredBanner(),
       // Play all / Shuffle
       SliverToBoxAdapter(child: Padding(
         padding: const EdgeInsets.fromLTRB(14, 12, 14, 2),
@@ -1204,19 +1292,13 @@ class AboutTab extends StatelessWidget {
       children: [
         // ---- Header ----
         Center(child: Column(children: [
-          Container(width: 96, height: 96,
-            decoration: BoxDecoration(shape: BoxShape.circle,
-              boxShadow: [BoxShadow(color: kPrimary.withOpacity(0.4),
-                blurRadius: 30, spreadRadius: 2)]),
-            child: ClipOval(child: Image.network(
-              'https://farooqmusic.com/farooq-logo.png', fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => Container(color: kCard,
-                child: const Icon(Icons.music_note,
-                  color: kPrimary, size: 40))))),
-          const SizedBox(height: 14),
-          const Text('Farooq Music', style: TextStyle(color: kOn,
-            fontSize: 22, fontWeight: FontWeight.w900)),
-          const SizedBox(height: 2),
+          Image.network(
+            'https://farooqmusic.com/farooq-music-logo.png',
+            height: 64, fit: BoxFit.contain,
+            errorBuilder: (_, __, ___) => const Text('Farooq Music',
+              style: TextStyle(color: kOn,
+                fontSize: 22, fontWeight: FontWeight.w900))),
+          const SizedBox(height: 12),
           const Text('Mohammad Farooq · AI Music Producer · Doha',
             textAlign: TextAlign.center,
             style: TextStyle(color: kMuted, fontSize: 12)),
