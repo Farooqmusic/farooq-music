@@ -44,6 +44,9 @@ SupabaseClient get supabase => Supabase.instance.client;
 // The currently logged-in user (null = guest). The whole UI listens to this.
 final authUser = ValueNotifier<User?>(null);
 
+// All loaded tracks, shared so the Search tab can read them without refetching.
+final allTracks = ValueNotifier<List<SCTrack>>([]);
+
 // Pretty display name for a user: metadata name -> email -> fallback.
 String displayName(User u) {
   final n = u.userMetadata?['full_name'] ?? u.userMetadata?['name'];
@@ -433,7 +436,8 @@ class _HomeState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) => Scaffold(
     body: IndexedStack(index: _tab,
-      children: const [MusicTab(), VideoTab(), AboutTab()]),
+      children: const [MusicTab(), VideoTab(), PlaylistsTab(),
+        SearchTab(), AboutTab()]),
     bottomNavigationBar: Column(mainAxisSize: MainAxisSize.min, children: [
       const MiniPlayer(),
       NavigationBar(backgroundColor: kCard, selectedIndex: _tab,
@@ -441,17 +445,103 @@ class _HomeState extends State<HomeScreen> {
         indicatorColor: kPrimary.withOpacity(0.25),
         destinations: const [
           NavigationDestination(
-            icon: Icon(Icons.music_note_outlined, color: kMuted),
-            selectedIcon: Icon(Icons.music_note, color: kLight),
-            label: 'Music'),
+            icon: Icon(Icons.home_outlined, color: kMuted),
+            selectedIcon: Icon(Icons.home, color: kLight),
+            label: 'Home'),
           NavigationDestination(
             icon: Icon(Icons.smart_display_outlined, color: kMuted),
             selectedIcon: Icon(Icons.smart_display, color: kLight),
             label: 'Videos'),
           NavigationDestination(
+            icon: Icon(Icons.queue_music, color: kMuted),
+            selectedIcon: Icon(Icons.queue_music, color: kLight),
+            label: 'Playlists'),
+          NavigationDestination(
+            icon: Icon(Icons.search, color: kMuted),
+            selectedIcon: Icon(Icons.search, color: kLight),
+            label: 'Search'),
+          NavigationDestination(
             icon: Icon(Icons.person_outline, color: kMuted),
             selectedIcon: Icon(Icons.person, color: kLight),
             label: 'About')])]));
+}
+
+// ---------------- Playlists tab (placeholder for Step 4) ----------------
+class PlaylistsTab extends StatelessWidget {
+  const PlaylistsTab({super.key});
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: kBg,
+    body: SafeArea(child: Center(child: Padding(
+      padding: const EdgeInsets.all(28),
+      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+        Container(
+          padding: const EdgeInsets.all(22),
+          decoration: BoxDecoration(color: kCard, shape: BoxShape.circle,
+            border: Border.all(color: kBorder)),
+          child: const Icon(Icons.queue_music, color: kLight, size: 44)),
+        const SizedBox(height: 18),
+        const Text('Your Playlists', style: TextStyle(color: kOn,
+          fontSize: 20, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 8),
+        const Text('Soon you\'ll be able to create your own playlists '
+          'from any tracks. Coming next!',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: kMuted, fontSize: 13, height: 1.5)),
+      ])))));
+}
+
+// ---------------- Search tab ----------------
+class SearchTab extends StatefulWidget {
+  const SearchTab({super.key});
+  @override State<SearchTab> createState() => _SearchState();
+}
+class _SearchState extends State<SearchTab> {
+  String _q = '';
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: kBg,
+    body: SafeArea(child: Column(children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+        child: Container(
+          decoration: BoxDecoration(color: kCard,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: kBorder)),
+          child: TextField(
+            onChanged: (v) => setState(() => _q = v),
+            style: const TextStyle(color: kOn),
+            decoration: const InputDecoration(
+              hintText: 'Search tracks...',
+              hintStyle: TextStyle(color: kMuted),
+              prefixIcon: Icon(Icons.search, color: kMuted),
+              border: InputBorder.none,
+              contentPadding: EdgeInsets.symmetric(vertical: 14))))),
+      Expanded(child: ValueListenableBuilder<List<SCTrack>>(
+        valueListenable: allTracks,
+        builder: (_, tracks, __) {
+          final q = _q.trim().toLowerCase();
+          if (q.isEmpty) {
+            return const Center(child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Text('Search your tracks by name or genre',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: kMuted, fontSize: 13))));
+          }
+          final r = tracks.where((t) =>
+            t.title.toLowerCase().contains(q) ||
+            (t.genre ?? '').toLowerCase().contains(q)).toList();
+          if (r.isEmpty) {
+            return const Center(child: Text('No tracks found',
+              style: TextStyle(color: kMuted)));
+          }
+          return ListView.builder(
+            padding: const EdgeInsets.only(top: 4, bottom: 12),
+            itemCount: r.length,
+            itemBuilder: (_, i) => TrackTile(track: r[i],
+              onTap: () => playQueue(r, i)));
+        })),
+    ])));
 }
 
 class MusicTab extends StatefulWidget {
@@ -482,6 +572,7 @@ class _MusicState extends State<MusicTab> {
     setState(() { _loading = true; _error = null; });
     try {
       final t = await fetchTracks();
+      allTracks.value = t;
       setState(() { _all = t; _loading = false; });
     } catch (e) {
       setState(() { _error = e.toString(); _loading = false; });
@@ -583,19 +674,6 @@ class _MusicState extends State<MusicTab> {
             ])),
             const AccountButton(),
           ]),
-          const SizedBox(height: 12),
-          Container(decoration: BoxDecoration(color: kCard,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: kBorder)),
-            child: TextField(
-              onChanged: (v) => setState(() => _q = v),
-              style: const TextStyle(color: kOn),
-              decoration: const InputDecoration(
-                hintText: 'Search tracks...',
-                hintStyle: TextStyle(color: kMuted),
-                prefixIcon: Icon(Icons.search, color: kMuted),
-                border: InputBorder.none,
-                contentPadding: EdgeInsets.symmetric(vertical: 12)))),
         ])),
       // ---- Body ----
       Expanded(child: _loading
