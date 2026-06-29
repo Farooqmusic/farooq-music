@@ -72,23 +72,37 @@ Future<void> loadAvatarUrl() async {
 // URL on the user's profile row. Returns true on success, false if cancelled.
 Future<bool> pickAndUploadAvatar(ImageSource source) async {
   final user = supabase.auth.currentUser;
-  if (user == null) return false;
+  if (user == null) throw 'Not signed in';
   final XFile? picked = await _avatarPicker.pickImage(
     source: source, maxWidth: 256, maxHeight: 256, imageQuality: 80);
   if (picked == null) return false; // user cancelled the picker
   final Uint8List bytes = await picked.readAsBytes();
   final path = '${user.id}/avatar.jpg';
-  await supabase.storage.from('avatars').uploadBinary(
-    path, bytes,
-    fileOptions: const FileOptions(upsert: true, contentType: 'image/jpeg'));
+
+  // 1) Upload the image to Storage.
+  try {
+    await supabase.storage.from('avatars').uploadBinary(
+      path, bytes,
+      fileOptions: const FileOptions(upsert: true, contentType: 'image/jpeg'));
+  } catch (e) {
+    throw 'Upload step: $e';
+  }
+
   final base = supabase.storage.from('avatars').getPublicUrl(path);
   // Same filename each time, so add a cache-buster to force the new image.
   final url = '$base?v=${DateTime.now().millisecondsSinceEpoch}';
-  await supabase.from('profiles').upsert({
-    'id': user.id,
-    'avatar_url': url,
-    'updated_at': DateTime.now().toIso8601String(),
-  });
+
+  // 2) Save the URL on the user's profile row.
+  try {
+    await supabase.from('profiles').upsert({
+      'id': user.id,
+      'avatar_url': url,
+      'updated_at': DateTime.now().toIso8601String(),
+    });
+  } catch (e) {
+    throw 'Save step: $e';
+  }
+
   avatarUrl.value = url;
   return true;
 }
@@ -536,10 +550,16 @@ class _MusicState extends State<MusicTab> {
           Row(children: [
             Expanded(child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: const [
-              Text('Farooq Music', style: TextStyle(
-                color: kLight, fontSize: 26, fontWeight: FontWeight.w900)),
-              Text('Mohammad Farooq · AI Music',
+              children: [
+              Align(alignment: Alignment.centerLeft,
+                child: Image.network(
+                  'https://farooqmusic.com/farooq-music-logo.png',
+                  height: 38, fit: BoxFit.contain,
+                  errorBuilder: (_, __, ___) => const Text('Farooq Music',
+                    style: TextStyle(color: kLight, fontSize: 26,
+                      fontWeight: FontWeight.w900)))),
+              const SizedBox(height: 3),
+              const Text('AI Music',
                 style: TextStyle(color: kMuted, fontSize: 12)),
             ])),
             const AccountButton(),
@@ -1321,6 +1341,7 @@ class _AccountScreenState extends State<AccountScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(msg, style: const TextStyle(color: kOn)),
+      duration: const Duration(seconds: 6),
       backgroundColor: kCard, behavior: SnackBarBehavior.floating));
   }
 
@@ -1543,8 +1564,8 @@ class _AccountScreenState extends State<AccountScreen> {
           choice == 'camera' ? ImageSource.camera : ImageSource.gallery);
         if (ok) _snack('Photo updated');
       }
-    } catch (_) {
-      _snack('Could not update photo');
+    } catch (e) {
+      _snack('$e');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
