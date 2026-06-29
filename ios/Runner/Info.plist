@@ -81,6 +81,9 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Farooq Music needs access to your photos so you can set a profile picture.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Farooq Music needs camera access so you can take a profile picture.</string>
 </dict>
 </plist>
-
