@@ -543,28 +543,515 @@ class _HomeState extends State<HomeScreen> {
 }
 
 // ---------------- Playlists tab (placeholder for Step 4) ----------------
-class PlaylistsTab extends StatelessWidget {
+// ===========================================================================
+// Playlists (Supabase: playlists + playlist_tracks, RLS owner-only)
+// ===========================================================================
+class Playlist {
+  final String id;
+  String name;
+  int count;
+  Playlist({required this.id, required this.name, this.count = 0});
+}
+
+String? get _myUid => authUser.value?.id;
+
+Future<List<Playlist>> fetchPlaylists() async {
+  final uid = _myUid;
+  if (uid == null) return [];
+  final rows = await supabase.from('playlists')
+    .select('id, name, created_at')
+    .eq('user_id', uid)
+    .order('created_at', ascending: false);
+  final pls = (rows as List).map((r) => Playlist(
+    id: r['id'].toString(),
+    name: (r['name'] ?? 'Playlist').toString())).toList();
+  // Track counts (one extra query; RLS already scopes rows to this user).
+  try {
+    final tr = await supabase.from('playlist_tracks').select('playlist_id');
+    final counts = <String, int>{};
+    for (final r in (tr as List)) {
+      final pid = r['playlist_id'].toString();
+      counts[pid] = (counts[pid] ?? 0) + 1;
+    }
+    for (final p in pls) { p.count = counts[p.id] ?? 0; }
+  } catch (_) {}
+  return pls;
+}
+
+Future<Playlist?> createPlaylist(String name) async {
+  final uid = _myUid;
+  if (uid == null) return null;
+  final r = await supabase.from('playlists')
+    .insert({'user_id': uid, 'name': name})
+    .select('id, name').single();
+  return Playlist(id: r['id'].toString(), name: (r['name'] ?? name).toString());
+}
+
+Future<void> renamePlaylist(String id, String name) async {
+  await supabase.from('playlists').update({'name': name}).eq('id', id);
+}
+
+Future<void> deletePlaylist(String id) async {
+  await supabase.from('playlists').delete().eq('id', id);
+}
+
+Future<List<String>> fetchPlaylistTrackIds(String playlistId) async {
+  final rows = await supabase.from('playlist_tracks')
+    .select('track_id, position')
+    .eq('playlist_id', playlistId)
+    .order('position', ascending: true);
+  return (rows as List).map((r) => r['track_id'].toString()).toList();
+}
+
+// Returns true if added, false if the track was already in the playlist.
+Future<bool> addTrackToPlaylist(String playlistId, String trackId) async {
+  final existing = await supabase.from('playlist_tracks')
+    .select('track_id').eq('playlist_id', playlistId);
+  final ids = (existing as List).map((r) => r['track_id'].toString()).toSet();
+  if (ids.contains(trackId)) return false;
+  await supabase.from('playlist_tracks').insert({
+    'playlist_id': playlistId, 'track_id': trackId, 'position': ids.length});
+  return true;
+}
+
+Future<void> removeTrackFromPlaylist(String playlistId, String trackId) async {
+  await supabase.from('playlist_tracks').delete()
+    .eq('playlist_id', playlistId).eq('track_id', trackId);
+}
+
+Future<void> reorderPlaylist(String playlistId, List<String> ids) async {
+  for (int i = 0; i < ids.length; i++) {
+    await supabase.from('playlist_tracks').update({'position': i})
+      .eq('playlist_id', playlistId).eq('track_id', ids[i]);
+  }
+}
+
+// Map stored track-ids back to full SCTracks using the loaded library.
+List<SCTrack> resolvePlaylistTracks(List<String> ids) {
+  final map = {for (final t in allTracks.value) t.id: t};
+  final out = <SCTrack>[];
+  for (final id in ids) { final t = map[id]; if (t != null) out.add(t); }
+  return out;
+}
+
+void _toast(BuildContext c, String m) {
+  ScaffoldMessenger.of(c).showSnackBar(SnackBar(
+    content: Text(m, style: const TextStyle(color: kOn)),
+    backgroundColor: kCard, behavior: SnackBarBehavior.floating));
+}
+
+Future<String?> _promptName(BuildContext context, String title,
+    String initial) {
+  final ctrl = TextEditingController(text: initial);
+  return showDialog<String>(context: context, builder: (ctx) => AlertDialog(
+    backgroundColor: kCard,
+    title: Text(title, style: const TextStyle(color: kOn, fontSize: 17)),
+    content: TextField(controller: ctrl, autofocus: true,
+      style: const TextStyle(color: kOn), cursorColor: kLight,
+      decoration: const InputDecoration(
+        hintText: 'Playlist name', hintStyle: TextStyle(color: kMuted),
+        enabledBorder: UnderlineInputBorder(
+          borderSide: BorderSide(color: kBorder)),
+        focusedBorder: UnderlineInputBorder(
+          borderSide: BorderSide(color: kPrimary)))),
+    actions: [
+      TextButton(onPressed: () => Navigator.pop(ctx),
+        child: const Text('Cancel', style: TextStyle(color: kMuted))),
+      TextButton(onPressed: () => Navigator.pop(ctx, ctrl.text),
+        child: const Text('Save', style: TextStyle(color: kLight))),
+    ]));
+}
+
+// Bottom sheet: add a track to a playlist (or make a new one first).
+Future<void> addToPlaylistSheet(BuildContext context, SCTrack track) async {
+  if (authUser.value == null) {
+    _toast(context, 'Sign in to use playlists');
+    return;
+  }
+  await showModalBottomSheet(context: context, backgroundColor: kBg,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+    builder: (_) => _AddToPlaylistSheet(track: track));
+}
+
+class _AddToPlaylistSheet extends StatefulWidget {
+  final SCTrack track;
+  const _AddToPlaylistSheet({required this.track});
+  @override
+  State<_AddToPlaylistSheet> createState() => _AddToPlaylistSheetState();
+}
+
+class _AddToPlaylistSheetState extends State<_AddToPlaylistSheet> {
+  bool _loading = true;
+  List<Playlist> _pls = [];
+
+  @override
+  void initState() { super.initState(); _load(); }
+
+  Future<void> _load() async {
+    try { _pls = await fetchPlaylists(); } catch (_) {}
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _add(Playlist p) async {
+    final messenger = ScaffoldMessenger.of(context);
+    void snack(String m) => messenger.showSnackBar(SnackBar(
+      content: Text(m, style: const TextStyle(color: kOn)),
+      backgroundColor: kCard, behavior: SnackBarBehavior.floating));
+    try {
+      final added = await addTrackToPlaylist(p.id, widget.track.id);
+      if (mounted) Navigator.pop(context);
+      snack(added ? 'Added to ${p.name}' : 'Already in ${p.name}');
+    } catch (_) { snack('Could not add'); }
+  }
+
+  Future<void> _newAndAdd() async {
+    final name = await _promptName(context, 'New Playlist', '');
+    if (name == null || name.trim().isEmpty) return;
+    try {
+      final p = await createPlaylist(name.trim());
+      if (p != null) await _add(p);
+    } catch (_) { _toast(context, 'Could not create'); }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(child: Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Container(margin: const EdgeInsets.only(top: 10),
+          width: 40, height: 4, decoration: BoxDecoration(color: kBorder,
+            borderRadius: BorderRadius.circular(99))),
+        const Padding(padding: EdgeInsets.all(16),
+          child: Text('Add to playlist', style: TextStyle(color: kOn,
+            fontSize: 16, fontWeight: FontWeight.w800))),
+        ListTile(
+          leading: const Icon(Icons.add, color: kLight),
+          title: const Text('New playlist',
+            style: TextStyle(color: kLight, fontWeight: FontWeight.w700)),
+          onTap: _newAndAdd),
+        const Divider(color: kBorder, height: 1),
+        if (_loading)
+          const Padding(padding: EdgeInsets.all(24),
+            child: CircularProgressIndicator(color: kPrimary))
+        else if (_pls.isEmpty)
+          const Padding(padding: EdgeInsets.all(20),
+            child: Text('No playlists yet. Create one above.',
+              style: TextStyle(color: kMuted)))
+        else
+          Flexible(child: ListView(shrinkWrap: true, children: _pls.map((p) =>
+            ListTile(
+              leading: const Icon(Icons.queue_music, color: kMuted),
+              title: Text(p.name, style: const TextStyle(color: kOn)),
+              subtitle: Text('${p.count} tracks',
+                style: const TextStyle(color: kMuted, fontSize: 12)),
+              onTap: () => _add(p))).toList())),
+        const SizedBox(height: 8),
+      ])));
+  }
+}
+
+class PlaylistsTab extends StatefulWidget {
   const PlaylistsTab({super.key});
   @override
-  Widget build(BuildContext context) => Scaffold(
-    backgroundColor: kBg,
-    body: SafeArea(child: Center(child: Padding(
-      padding: const EdgeInsets.all(28),
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Container(
-          padding: const EdgeInsets.all(22),
-          decoration: BoxDecoration(color: kCard, shape: BoxShape.circle,
-            border: Border.all(color: kBorder)),
-          child: const Icon(Icons.queue_music, color: kLight, size: 44)),
-        const SizedBox(height: 18),
-        const Text('Your Playlists', style: TextStyle(color: kOn,
-          fontSize: 20, fontWeight: FontWeight.w900)),
-        const SizedBox(height: 8),
-        const Text('Soon you\'ll be able to create your own playlists '
-          'from any tracks. Coming next!',
-          textAlign: TextAlign.center,
-          style: TextStyle(color: kMuted, fontSize: 13, height: 1.5)),
-      ])))));
+  State<PlaylistsTab> createState() => _PlaylistsTabState();
+}
+
+class _PlaylistsTabState extends State<PlaylistsTab> {
+  bool _loading = true;
+  List<Playlist> _pls = [];
+
+  @override
+  void initState() {
+    super.initState();
+    authUser.addListener(_onAuth);
+    _load();
+  }
+
+  @override
+  void dispose() { authUser.removeListener(_onAuth); super.dispose(); }
+
+  void _onAuth() { if (mounted) _load(); }
+
+  Future<void> _load() async {
+    if (authUser.value == null) {
+      if (mounted) setState(() { _loading = false; _pls = []; });
+      return;
+    }
+    setState(() => _loading = true);
+    try { _pls = await fetchPlaylists(); } catch (_) {}
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _new() async {
+    final name = await _promptName(context, 'New Playlist', '');
+    if (name == null || name.trim().isEmpty) return;
+    try { await createPlaylist(name.trim()); await _load(); }
+    catch (_) { if (mounted) _toast(context, 'Could not create'); }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: kBg,
+      appBar: AppBar(backgroundColor: kBg, elevation: 0,
+        title: const Text('Playlists',
+          style: TextStyle(color: kOn, fontWeight: FontWeight.w800)),
+        actions: [
+          if (authUser.value != null)
+            IconButton(icon: const Icon(Icons.add, color: kLight),
+              onPressed: _new),
+        ]),
+      body: ValueListenableBuilder<User?>(
+        valueListenable: authUser,
+        builder: (_, user, __) {
+          if (user == null) return _signInPrompt();
+          if (_loading) {
+            return const Center(
+              child: CircularProgressIndicator(color: kPrimary));
+          }
+          if (_pls.isEmpty) return _empty();
+          return RefreshIndicator(
+            color: kPrimary, backgroundColor: kCard, onRefresh: _load,
+            child: ListView.builder(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              itemCount: _pls.length,
+              itemBuilder: (_, i) => _playlistTile(_pls[i])));
+        }),
+    );
+  }
+
+  Widget _playlistTile(Playlist p) => Container(
+    margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+    decoration: BoxDecoration(color: kCard,
+      borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: kBorder)),
+    child: ListTile(
+      leading: Container(width: 46, height: 46,
+        decoration: BoxDecoration(color: kPrimary.withOpacity(0.18),
+          borderRadius: BorderRadius.circular(10)),
+        child: const Icon(Icons.queue_music, color: kLight)),
+      title: Text(p.name, maxLines: 1, overflow: TextOverflow.ellipsis,
+        style: const TextStyle(color: kOn, fontWeight: FontWeight.w700)),
+      subtitle: Text('${p.count} tracks',
+        style: const TextStyle(color: kMuted, fontSize: 12)),
+      trailing: const Icon(Icons.chevron_right, color: kMuted),
+      onTap: () async {
+        await Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => PlaylistScreen(playlist: p)));
+        _load();
+      }));
+
+  Widget _signInPrompt() => Center(child: Padding(
+    padding: const EdgeInsets.all(28),
+    child: Column(mainAxisSize: MainAxisSize.min, children: [
+      Container(padding: const EdgeInsets.all(22),
+        decoration: BoxDecoration(color: kCard, shape: BoxShape.circle,
+          border: Border.all(color: kBorder)),
+        child: const Icon(Icons.queue_music, color: kLight, size: 44)),
+      const SizedBox(height: 18),
+      const Text('Your Playlists', style: TextStyle(color: kOn,
+        fontSize: 20, fontWeight: FontWeight.w900)),
+      const SizedBox(height: 8),
+      const Text('Sign in to create your own playlists from any track.',
+        textAlign: TextAlign.center,
+        style: TextStyle(color: kMuted, fontSize: 13, height: 1.5)),
+      const SizedBox(height: 18),
+      ElevatedButton.icon(
+        style: ElevatedButton.styleFrom(backgroundColor: kPrimary,
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(99))),
+        icon: const Icon(Icons.login, color: Colors.white),
+        label: const Text('Sign in', style: TextStyle(color: Colors.white,
+          fontWeight: FontWeight.w700)),
+        onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => const AccountScreen()))),
+    ])));
+
+  Widget _empty() => Center(child: Padding(
+    padding: const EdgeInsets.all(28),
+    child: Column(mainAxisSize: MainAxisSize.min, children: [
+      const Icon(Icons.queue_music, color: kMuted, size: 48),
+      const SizedBox(height: 14),
+      const Text('No playlists yet', style: TextStyle(color: kOn,
+        fontSize: 18, fontWeight: FontWeight.w800)),
+      const SizedBox(height: 6),
+      const Text('Tap + to create one, then add any track with its ➕ button.',
+        textAlign: TextAlign.center,
+        style: TextStyle(color: kMuted, fontSize: 13, height: 1.5)),
+      const SizedBox(height: 16),
+      OutlinedButton.icon(onPressed: _new,
+        style: OutlinedButton.styleFrom(
+          side: const BorderSide(color: kPrimary)),
+        icon: const Icon(Icons.add, color: kLight),
+        label: const Text('New Playlist', style: TextStyle(color: kLight))),
+    ])));
+}
+
+class PlaylistScreen extends StatefulWidget {
+  final Playlist playlist;
+  const PlaylistScreen({super.key, required this.playlist});
+  @override
+  State<PlaylistScreen> createState() => _PlaylistScreenState();
+}
+
+class _PlaylistScreenState extends State<PlaylistScreen> {
+  bool _loading = true;
+  List<SCTrack> _tracks = [];
+  late String _name;
+
+  @override
+  void initState() {
+    super.initState();
+    _name = widget.playlist.name;
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      // Make sure the track library is available to resolve ids against.
+      if (allTracks.value.isEmpty) {
+        try { allTracks.value = await fetchTracks(); } catch (_) {}
+      }
+      final ids = await fetchPlaylistTrackIds(widget.playlist.id);
+      _tracks = resolvePlaylistTracks(ids);
+    } catch (_) {}
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _rename() async {
+    final n = await _promptName(context, 'Rename Playlist', _name);
+    if (n == null || n.trim().isEmpty) return;
+    try {
+      await renamePlaylist(widget.playlist.id, n.trim());
+      if (mounted) setState(() => _name = n.trim());
+    } catch (_) { if (mounted) _toast(context, 'Could not rename'); }
+  }
+
+  Future<void> _delete() async {
+    final ok = await showDialog<bool>(context: context, builder: (ctx) =>
+      AlertDialog(backgroundColor: kCard,
+        title: const Text('Delete playlist?',
+          style: TextStyle(color: kOn, fontSize: 17)),
+        content: Text('"$_name" will be removed.',
+          style: const TextStyle(color: kMuted)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel', style: TextStyle(color: kMuted))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete',
+              style: TextStyle(color: Color(0xFFff6b6b)))),
+        ]));
+    if (ok != true) return;
+    try {
+      await deletePlaylist(widget.playlist.id);
+      if (mounted) Navigator.pop(context);
+    } catch (_) { if (mounted) _toast(context, 'Could not delete'); }
+  }
+
+  Future<void> _remove(SCTrack t) async {
+    setState(() => _tracks.removeWhere((x) => x.id == t.id));
+    try { await removeTrackFromPlaylist(widget.playlist.id, t.id); }
+    catch (_) { if (mounted) { _toast(context, 'Could not remove'); _load(); } }
+  }
+
+  Future<void> _onReorder(int oldI, int newI) async {
+    setState(() {
+      if (newI > oldI) newI -= 1;
+      final t = _tracks.removeAt(oldI);
+      _tracks.insert(newI, t);
+    });
+    try {
+      await reorderPlaylist(widget.playlist.id,
+        _tracks.map((t) => t.id).toList());
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: kBg,
+      appBar: AppBar(backgroundColor: kBg, elevation: 0,
+        iconTheme: const IconThemeData(color: kOn),
+        title: Text(_name, maxLines: 1, overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: kOn, fontWeight: FontWeight.w700)),
+        actions: [
+          IconButton(icon: const Icon(Icons.edit_outlined, color: kLight),
+            onPressed: _rename),
+          IconButton(icon: const Icon(Icons.delete_outline, color: kLight),
+            onPressed: _delete),
+        ]),
+      bottomNavigationBar: const MiniPlayer(),
+      body: _loading
+        ? const Center(child: CircularProgressIndicator(color: kPrimary))
+        : _tracks.isEmpty
+          ? Center(child: Padding(padding: const EdgeInsets.all(24),
+              child: Column(mainAxisSize: MainAxisSize.min, children: const [
+                Icon(Icons.music_note, color: kMuted, size: 44),
+                SizedBox(height: 12),
+                Text('No tracks yet.\nAdd tracks with their ➕ button.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: kMuted, height: 1.5)),
+              ])))
+          : Column(children: [
+              Padding(padding: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+                child: Row(children: [
+                  Expanded(child: SizedBox(height: 46,
+                    child: ElevatedButton.icon(
+                      onPressed: () => playQueue(_tracks, 0),
+                      style: ElevatedButton.styleFrom(backgroundColor: kPrimary,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12))),
+                      icon: const Icon(Icons.play_arrow, color: Colors.white),
+                      label: const Text('Play all', style: TextStyle(
+                        color: Colors.white, fontWeight: FontWeight.w700))))),
+                  const SizedBox(width: 10),
+                  const Expanded(child: ShuffleRepeatPill()),
+                ])),
+              Expanded(child: ReorderableListView.builder(
+                padding: const EdgeInsets.only(bottom: 12),
+                itemCount: _tracks.length,
+                onReorder: _onReorder,
+                itemBuilder: (_, i) =>
+                  _reorderTile(_tracks[i], i, ValueKey(_tracks[i].id)))),
+            ]),
+    );
+  }
+
+  Widget _reorderTile(SCTrack t, int i, Key key) => Container(
+    key: key,
+    margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+    padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+    decoration: BoxDecoration(color: kCard,
+      borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: kBorder)),
+    child: Row(children: [
+      ClipRRect(borderRadius: BorderRadius.circular(8),
+        child: t.artworkUrl != null
+          ? Image.network(t.artworkUrl!, width: 48, height: 48,
+              fit: BoxFit.cover, errorBuilder: (_, __, ___) => _ph())
+          : _ph()),
+      const SizedBox(width: 12),
+      Expanded(child: Text(t.title, maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(color: kOn, fontWeight: FontWeight.w600,
+          fontSize: 14))),
+      IconButton(visualDensity: VisualDensity.compact,
+        icon: const Icon(Icons.play_circle, color: kPrimary, size: 28),
+        onPressed: () => playQueue(_tracks, i)),
+      IconButton(visualDensity: VisualDensity.compact,
+        icon: const Icon(Icons.remove_circle_outline, color: kMuted, size: 22),
+        onPressed: () => _remove(t)),
+      ReorderableDragStartListener(index: i,
+        child: const Padding(padding: EdgeInsets.only(left: 2),
+          child: Icon(Icons.drag_handle, color: kMuted))),
+    ]));
+
+  Widget _ph() => Container(width: 48, height: 48, color: kBg,
+    child: const Icon(Icons.music_note, color: kPrimary));
 }
 
 // ---------------- Search tab ----------------
@@ -1033,9 +1520,20 @@ class TrackTile extends StatelessWidget {
             Text(_fmt(track.duration),
               style: const TextStyle(color:kMuted, fontSize:11))])])),
         IconButton(
-          icon: const Icon(Icons.share, color: kMuted, size: 20),
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+          icon: const Icon(Icons.playlist_add, color: kMuted, size: 21),
+          onPressed: () => addToPlaylistSheet(context, track)),
+        const SizedBox(width: 2),
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+          icon: const Icon(Icons.share, color: kMuted, size: 19),
           onPressed: () => shareTrack(track)),
-        const Icon(Icons.play_circle, color:kPrimary, size:32)])));
+        const SizedBox(width: 4),
+        const Icon(Icons.play_circle, color:kPrimary, size:30)])));
   Widget _ph() => Container(width:52, height:52, color:kBg,
     child: const Icon(Icons.music_note, color:kPrimary));
 }
