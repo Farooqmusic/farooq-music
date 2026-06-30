@@ -14,6 +14,7 @@ import 'package:crypto/crypto.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:typed_data';
 import 'dart:math';
+import 'dart:ui' as ui;
 
 const kBaseUrl = 'https://farooqmusic.com/mobile.php';
 const kBg      = Color(0xFF1a0e22);
@@ -281,9 +282,17 @@ Future<void> _recoverIndex(int i) async {
   }
 }
 
+// Universal smart share link. `s.php` shows a 1:1 thumbnail preview (OG image)
+// in WhatsApp/iMessage etc., and on tap opens the song in the app if it's
+// installed (iOS/Android) or falls back to the website. One link works
+// everywhere — today it opens the web player; once the app is on the stores
+// the same link opens the app automatically (no need to re-share).
 void shareTrack(SCTrack track) {
-  final url = 'https://farooqmusic.com/share.php?track=${track.id}';
-  Share.share('${track.title} — Farooq Music\n$url');
+  final url = 'https://farooqmusic.com/s.php?t=${track.id}';
+  final msg = '🎵 ${track.title}\n'
+      'Farooq Music — AI Urdu music by Mohammad Farooq 🎧\n\n'
+      '$url';
+  Share.share(msg, subject: '${track.title} — Farooq Music');
 }
 
 Future<void> openUrl(String url) async {
@@ -724,15 +733,30 @@ class _MusicState extends State<MusicTab> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(18),
                   child: Stack(fit: StackFit.expand, children: [
-                    (t.bannerUrl ?? t.artworkUrl) == null
-                      ? const ColoredBox(color: kCard)
-                      : Image.network((t.bannerUrl ?? t.artworkUrl)!,
-                          fit: BoxFit.cover,
+                    // Show the COMPLETE artwork, never cropped. A blurred
+                    // cover-fit copy sits behind so any aspect ratio (wide
+                    // visual OR square fallback) looks clean with no empty
+                    // black bands.
+                    Builder(builder: (_) {
+                      final img = t.bannerUrl ?? t.artworkUrl;
+                      if (img == null) return const ColoredBox(color: kCard);
+                      return Stack(fit: StackFit.expand, children: [
+                        ImageFiltered(
+                          imageFilter:
+                            ui.ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+                          child: Image.network(img, fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) =>
+                              const ColoredBox(color: kCard))),
+                        const ColoredBox(color: Color(0x4D000000)),
+                        Image.network(img, fit: BoxFit.contain,
                           errorBuilder: (_, __, ___) => (t.artworkUrl != null)
-                            ? Image.network(t.artworkUrl!, fit: BoxFit.cover,
+                            ? Image.network(t.artworkUrl!,
+                                fit: BoxFit.contain,
                                 errorBuilder: (_, __, ___) =>
                                   const ColoredBox(color: kCard))
                             : const ColoredBox(color: kCard)),
+                      ]);
+                    }),
                     const DecoratedBox(decoration: BoxDecoration(
                       gradient: LinearGradient(
                         begin: Alignment.topCenter,
@@ -1196,7 +1220,13 @@ class FullPlayer extends StatelessWidget {
                   label: const Text('Explanation',
                     style: TextStyle(color:kLight, fontSize:13)),
                   onPressed: () => openUrl(track!.explanation!))])])),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
+        // Colorful animated sound-wave visualizer (Point 3). Sits ABOVE the
+        // progress bar; the spacing below pushes the bar + controls down.
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 28),
+          child: AudioWaveBar(height: 60)),
+        const SizedBox(height: 18),
         StreamBuilder<Duration>(
           stream: player.positionStream,
           builder: (_, ps) {
@@ -1253,6 +1283,93 @@ class FullPlayer extends StatelessWidget {
                   color: r ? kLight : kMuted, size:26),
                 onPressed: toggleRepeat))])),
         const SizedBox(height: 20)])));
+}
+
+// ---- Colorful animated sound-wave visualizer (now-playing screen) ----
+// just_audio does not expose real audio frequency (FFT) data, so this is a
+// synthetic but lively bar visualizer: it animates while a track is playing
+// and settles to a calm baseline when paused. Purely decorative.
+class AudioWaveBar extends StatefulWidget {
+  final double height;
+  const AudioWaveBar({super.key, this.height = 60});
+  @override
+  State<AudioWaveBar> createState() => _AudioWaveBarState();
+}
+
+class _AudioWaveBarState extends State<AudioWaveBar>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c;
+  final _rnd = Random();
+  late final List<double> _phase;
+  late final List<double> _speed;
+  static const int _bars = 42;
+
+  @override
+  void initState() {
+    super.initState();
+    _phase = List.generate(_bars, (_) => _rnd.nextDouble() * pi * 2);
+    _speed = List.generate(_bars, (_) => 0.7 + _rnd.nextDouble() * 0.9);
+    _c = AnimationController(
+      vsync: this, duration: const Duration(seconds: 2))
+      ..repeat();
+  }
+
+  @override
+  void dispose() { _c.dispose(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: isPlaying,
+      builder: (_, playing, __) => SizedBox(
+        height: widget.height,
+        width: double.infinity,
+        child: AnimatedBuilder(
+          animation: _c,
+          builder: (_, __) => CustomPaint(
+            painter: _WavePainter(
+              t: _c.value, phase: _phase, speed: _speed, playing: playing)),
+        ),
+      ),
+    );
+  }
+}
+
+class _WavePainter extends CustomPainter {
+  final double t;            // 0..1 animation clock
+  final List<double> phase;  // per-bar random phase
+  final List<double> speed;  // per-bar random speed
+  final bool playing;
+  _WavePainter({required this.t, required this.phase,
+    required this.speed, required this.playing});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final n = phase.length;
+    const gap = 3.0;
+    final bw = (size.width - gap * (n - 1)) / n;
+    final mid = size.height / 2;
+    final clock = t * 2 * pi;
+    for (int i = 0; i < n; i++) {
+      final wave = playing
+        ? (sin(clock * speed[i] + phase[i]) * 0.5 + 0.5)
+        : 0.10;
+      final h = (size.height * 0.16) + wave * (size.height * 0.84);
+      final x = i * (bw + gap);
+      // Sweep hue across the bar for a colorful, theme-friendly look.
+      final hue = (262 + (i / n) * 130) % 360;   // violet -> pink -> magenta
+      final color = HSVColor.fromAHSV(
+        playing ? 1.0 : 0.45, hue, 0.72, 1.0).toColor();
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(x, mid - h / 2, bw, h),
+        Radius.circular(bw / 2));
+      canvas.drawRRect(rect, Paint()..color = color);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_WavePainter old) =>
+    old.t != t || old.playing != playing;
 }
 
 class VideoTab extends StatelessWidget {
