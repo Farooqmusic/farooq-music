@@ -12,6 +12,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:crypto/crypto.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:youtube_player_iframe/youtube_player_iframe.dart';
 import 'dart:typed_data';
 import 'dart:math';
 
@@ -1535,38 +1536,351 @@ class _ProgressBarState extends State<_ProgressBar> {
   }
 }
 
+// ===========================================================================
+// Videos (YouTube) — two channel tabs, video list, in-app player + comments
+// ===========================================================================
+class YTVideo {
+  final String id, title;
+  final String? thumb, published;
+  const YTVideo({required this.id, required this.title,
+    this.thumb, this.published});
+  factory YTVideo.fromJson(Map<String, dynamic> j) => YTVideo(
+    id: (j['id'] ?? '').toString(),
+    title: (j['title'] ?? '').toString(),
+    thumb: j['thumb'] as String?,
+    published: j['published'] as String?);
+}
+
+class YTChannel {
+  final String title, handle;
+  final String? avatar, subs;
+  const YTChannel({required this.title, required this.handle,
+    this.avatar, this.subs});
+  factory YTChannel.fromJson(Map<String, dynamic> j) => YTChannel(
+    title: (j['title'] ?? 'Channel').toString(),
+    handle: (j['handle'] ?? '').toString(),
+    avatar: j['avatar'] as String?,
+    subs: j['subs']?.toString());
+}
+
 class VideoTab extends StatelessWidget {
   const VideoTab({super.key});
   @override
-  Widget build(BuildContext context) => Scaffold(backgroundColor: kBg,
-    appBar: AppBar(backgroundColor: kBg,
-      title: const Text('Videos',
-        style: TextStyle(color:kOn, fontWeight:FontWeight.w800))),
-    body: Center(child: Column(
-      mainAxisAlignment: MainAxisAlignment.center, children: [
-      Container(width:90, height:90,
-        decoration: BoxDecoration(color:kCard, shape:BoxShape.circle,
-          border: Border.all(color:kBorder, width:2)),
-        child: const Icon(Icons.smart_display, color:kPrimary, size:44)),
-      const SizedBox(height: 20),
-      const Text('YouTube Videos',
-        style: TextStyle(color:kOn, fontSize:22, fontWeight:FontWeight.w800)),
-      const SizedBox(height: 6),
-      const Text('@farooqmusicai',
-        style: TextStyle(color:kLight, fontSize:14)),
-      const SizedBox(height: 28),
-      ElevatedButton.icon(
-        style: ElevatedButton.styleFrom(backgroundColor:kPrimary,
-          padding: const EdgeInsets.symmetric(horizontal:24, vertical:12),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(99))),
-        icon: const Icon(Icons.open_in_new, color:Colors.white),
-        label: const Text('Open YouTube Channel',
-          style: TextStyle(color:Colors.white, fontWeight:FontWeight.w700)),
-        onPressed: () => openUrl('https://www.youtube.com/@farooqmusicai')),
-      const SizedBox(height: 10),
-      const Text('In-app videos coming soon',
-        style: TextStyle(color:kMuted, fontSize:12))])));
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        backgroundColor: kBg,
+        appBar: AppBar(
+          backgroundColor: kBg, elevation: 0,
+          title: const Text('Videos',
+            style: TextStyle(color: kOn, fontWeight: FontWeight.w800)),
+          bottom: const TabBar(
+            indicatorColor: kPrimary,
+            labelColor: kLight, unselectedLabelColor: kMuted,
+            labelStyle: TextStyle(fontWeight: FontWeight.w700),
+            tabs: [Tab(text: 'Farooq Music'), Tab(text: 'Farooq')]),
+        ),
+        body: const TabBarView(children: [
+          _ChannelVideos(channel: 'music'),
+          _ChannelVideos(channel: 'personal'),
+        ]),
+      ),
+    );
+  }
+}
+
+class _ChannelVideos extends StatefulWidget {
+  final String channel;
+  const _ChannelVideos({required this.channel});
+  @override
+  State<_ChannelVideos> createState() => _ChannelVideosState();
+}
+
+class _ChannelVideosState extends State<_ChannelVideos>
+    with AutomaticKeepAliveClientMixin {
+  bool _loading = true;
+  String? _error;
+  YTChannel? _ch;
+  List<YTVideo> _videos = [];
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() { super.initState(); _load(); }
+
+  Future<void> _load() async {
+    setState(() { _loading = true; _error = null; });
+    try {
+      final r = await http
+        .get(Uri.parse('$kBaseUrl?action=videos&ch=${widget.channel}'))
+        .timeout(const Duration(seconds: 15));
+      final j = jsonDecode(r.body);
+      if (j is Map && j['ok'] == true) {
+        _ch = j['channel'] is Map
+          ? YTChannel.fromJson(Map<String, dynamic>.from(j['channel'])) : null;
+        _videos = ((j['videos'] as List?) ?? [])
+          .map((e) => YTVideo.fromJson(Map<String, dynamic>.from(e)))
+          .toList();
+        _error = null;
+      } else {
+        _error = (j is Map ? j['error']?.toString() : null) ?? 'Could not load';
+      }
+    } catch (_) {
+      _error = 'Network error';
+    }
+    if (mounted) setState(() => _loading = false);
+  }
+
+  String _fmtDate(String? iso) {
+    if (iso == null) return '';
+    final d = DateTime.tryParse(iso);
+    if (d == null) return '';
+    const m = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct',
+      'Nov','Dec'];
+    return '${m[d.month - 1]} ${d.day}, ${d.year}';
+  }
+
+  String _fmtSubs(String s) {
+    final n = int.tryParse(s) ?? 0;
+    if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
+    if (n >= 1000) return '${(n / 1000).toStringAsFixed(1)}K';
+    return '$n';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator(color: kPrimary));
+    }
+    if (_error != null) {
+      return Center(child: Padding(padding: const EdgeInsets.all(24),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.error_outline, color: kMuted, size: 40),
+          const SizedBox(height: 12),
+          Text(_error!, textAlign: TextAlign.center,
+            style: const TextStyle(color: kMuted)),
+          const SizedBox(height: 16),
+          OutlinedButton(onPressed: _load,
+            style: OutlinedButton.styleFrom(
+              side: const BorderSide(color: kPrimary)),
+            child: const Text('Retry', style: TextStyle(color: kLight))),
+        ])));
+    }
+    return RefreshIndicator(
+      color: kPrimary, backgroundColor: kCard, onRefresh: _load,
+      child: ListView.builder(
+        padding: const EdgeInsets.only(bottom: 16),
+        itemCount: _videos.length + 1,
+        itemBuilder: (_, i) =>
+          i == 0 ? _header() : _videoCard(_videos[i - 1])),
+    );
+  }
+
+  Widget _header() {
+    final c = _ch;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: Row(children: [
+        if (c?.avatar != null)
+          CircleAvatar(radius: 26, backgroundColor: kCard,
+            backgroundImage: NetworkImage(c!.avatar!))
+        else
+          const CircleAvatar(radius: 26, backgroundColor: kCard,
+            child: Icon(Icons.smart_display, color: kPrimary)),
+        const SizedBox(width: 12),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+          Text(c?.title ?? 'Channel', maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: kOn, fontSize: 17,
+              fontWeight: FontWeight.w800)),
+          const SizedBox(height: 2),
+          Text([
+            if (c != null && c.handle.isNotEmpty) c.handle,
+            if (c?.subs != null) '${_fmtSubs(c!.subs!)} subscribers',
+          ].join('  ·  '),
+            style: const TextStyle(color: kMuted, fontSize: 12)),
+        ])),
+        IconButton(
+          icon: const Icon(Icons.open_in_new, color: kLight, size: 20),
+          onPressed: () =>
+            openUrl('https://www.youtube.com/${c?.handle ?? ''}')),
+      ]),
+    );
+  }
+
+  Widget _videoCard(YTVideo v) {
+    return InkWell(
+      onTap: () => Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) =>
+          VideoPlayerScreen(video: v, channelTitle: _ch?.title ?? ''))),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          ClipRRect(borderRadius: BorderRadius.circular(14),
+            child: AspectRatio(aspectRatio: 16 / 9, child: Stack(
+              fit: StackFit.expand, children: [
+              v.thumb != null
+                ? Image.network(v.thumb!, fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const ColoredBox(color: kCard))
+                : const ColoredBox(color: kCard),
+              Center(child: Container(width: 52, height: 52,
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.5), shape: BoxShape.circle),
+                child: const Icon(Icons.play_arrow,
+                  color: Colors.white, size: 30))),
+            ]))),
+          const SizedBox(height: 8),
+          Text(v.title, maxLines: 2, overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: kOn, fontSize: 14,
+              fontWeight: FontWeight.w600, height: 1.25)),
+          const SizedBox(height: 2),
+          Text(_fmtDate(v.published),
+            style: const TextStyle(color: kMuted, fontSize: 11.5)),
+        ]),
+      ),
+    );
+  }
+}
+
+// In-app YouTube player: real iframe player (inline + fullscreen on rotate +
+// native share), with the video title, action buttons and top comments below.
+class VideoPlayerScreen extends StatefulWidget {
+  final YTVideo video;
+  final String channelTitle;
+  const VideoPlayerScreen({super.key,
+    required this.video, required this.channelTitle});
+  @override
+  State<VideoPlayerScreen> createState() => _VideoPlayerScreenState();
+}
+
+class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
+  late final YoutubePlayerController _controller;
+  bool _loadingComments = true;
+  List<Map<String, dynamic>> _comments = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = YoutubePlayerController.fromVideoId(
+      videoId: widget.video.id,
+      autoPlay: true,
+      params: const YoutubePlayerParams(showFullscreenButton: true));
+    _loadComments();
+  }
+
+  Future<void> _loadComments() async {
+    try {
+      final r = await http
+        .get(Uri.parse('$kBaseUrl?action=comments&v=${widget.video.id}'))
+        .timeout(const Duration(seconds: 12));
+      final j = jsonDecode(r.body);
+      if (j is Map && j['ok'] == true) {
+        _comments = ((j['comments'] as List?) ?? [])
+          .map((e) => Map<String, dynamic>.from(e)).toList();
+      }
+    } catch (_) {}
+    if (mounted) setState(() => _loadingComments = false);
+  }
+
+  @override
+  void dispose() { _controller.close(); super.dispose(); }
+
+  void _share() => Share.share(
+    '${widget.video.title}\nhttps://youtu.be/${widget.video.id}');
+
+  @override
+  Widget build(BuildContext context) {
+    return YoutubePlayerScaffold(
+      controller: _controller,
+      aspectRatio: 16 / 9,
+      builder: (context, player) => Scaffold(
+        backgroundColor: kBg,
+        appBar: AppBar(backgroundColor: kBg, elevation: 0,
+          iconTheme: const IconThemeData(color: kOn),
+          title: const Text('Video',
+            style: TextStyle(color: kOn, fontWeight: FontWeight.w700))),
+        body: Column(children: [
+          player,
+          Expanded(child: ListView(padding: const EdgeInsets.all(16),
+            children: [
+              Text(widget.video.title,
+                style: const TextStyle(color: kOn, fontSize: 16,
+                  fontWeight: FontWeight.w800, height: 1.3)),
+              const SizedBox(height: 4),
+              Text(widget.channelTitle,
+                style: const TextStyle(color: kMuted, fontSize: 13)),
+              const SizedBox(height: 12),
+              Row(children: [
+                _action(Icons.share, 'Share', _share),
+                const SizedBox(width: 10),
+                _action(Icons.open_in_new, 'YouTube',
+                  () => openUrl('https://youtu.be/${widget.video.id}')),
+              ]),
+              const SizedBox(height: 18),
+              const Text('COMMENTS', style: TextStyle(color: kLight,
+                fontSize: 12, fontWeight: FontWeight.w700, letterSpacing: 1)),
+              const SizedBox(height: 8),
+              if (_loadingComments)
+                const Padding(padding: EdgeInsets.all(16),
+                  child: Center(child: CircularProgressIndicator(
+                    color: kPrimary, strokeWidth: 2)))
+              else if (_comments.isEmpty)
+                const Padding(padding: EdgeInsets.symmetric(vertical: 12),
+                  child: Text('No comments to show.',
+                    style: TextStyle(color: kMuted, fontSize: 13)))
+              else
+                ..._comments.map(_commentTile),
+            ])),
+        ]),
+      ),
+    );
+  }
+
+  Widget _action(IconData ic, String label, VoidCallback onTap) =>
+    OutlinedButton.icon(
+      onPressed: onTap,
+      style: OutlinedButton.styleFrom(
+        side: const BorderSide(color: kBorder),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(99))),
+      icon: Icon(ic, color: kLight, size: 18),
+      label: Text(label, style: const TextStyle(color: kLight)));
+
+  Widget _commentTile(Map<String, dynamic> c) {
+    final avatar = c['avatar']?.toString();
+    final likes = (c['likes'] is int) ? c['likes'] as int : 0;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        CircleAvatar(radius: 16, backgroundColor: kCard,
+          backgroundImage: avatar != null ? NetworkImage(avatar) : null,
+          child: avatar == null
+            ? const Icon(Icons.person, color: kMuted, size: 16) : null),
+        const SizedBox(width: 10),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+          Text(c['author']?.toString() ?? '',
+            style: const TextStyle(color: kLight, fontSize: 12.5,
+              fontWeight: FontWeight.w700)),
+          const SizedBox(height: 2),
+          Text(c['text']?.toString() ?? '',
+            style: const TextStyle(color: kOn, fontSize: 13, height: 1.3)),
+          if (likes > 0) ...[
+            const SizedBox(height: 3),
+            Row(children: [
+              const Icon(Icons.thumb_up_alt_outlined, color: kMuted, size: 12),
+              const SizedBox(width: 4),
+              Text('$likes', style: const TextStyle(color: kMuted, fontSize: 11)),
+            ]),
+          ],
+        ])),
+      ]),
+    );
+  }
 }
 
 class _Link {
