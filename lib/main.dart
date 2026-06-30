@@ -14,7 +14,6 @@ import 'package:crypto/crypto.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:typed_data';
 import 'dart:math';
-import 'dart:ui' as ui;
 
 const kBaseUrl = 'https://farooqmusic.com/mobile.php';
 const kBg      = Color(0xFF1a0e22);
@@ -788,7 +787,7 @@ class _MusicState extends State<MusicTab> {
     return SliverToBoxAdapter(child: Padding(
       padding: const EdgeInsets.only(top: 12, bottom: 2),
       child: Column(children: [
-        SizedBox(height: 196, child: PageView.builder(
+        SizedBox(height: 152, child: PageView.builder(
           controller: _bannerCtrl,
           itemCount: list.length,
           onPageChanged: (i) => setState(() => _bannerPage = i),
@@ -801,29 +800,18 @@ class _MusicState extends State<MusicTab> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(18),
                   child: Stack(fit: StackFit.expand, children: [
-                    // Show the COMPLETE artwork, never cropped. A blurred
-                    // cover-fit copy sits behind so any aspect ratio (wide
-                    // visual OR square fallback) looks clean with no empty
-                    // black bands.
+                    // Fill the banner completely (no empty top/bottom space).
+                    // The wide visuals are ~2.5:1, so at this banner height
+                    // cover fills edge-to-edge with negligible cropping.
                     Builder(builder: (_) {
                       final img = t.bannerUrl ?? t.artworkUrl;
                       if (img == null) return const ColoredBox(color: kCard);
-                      return Stack(fit: StackFit.expand, children: [
-                        ImageFiltered(
-                          imageFilter:
-                            ui.ImageFilter.blur(sigmaX: 22, sigmaY: 22),
-                          child: Image.network(img, fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) =>
-                              const ColoredBox(color: kCard))),
-                        const ColoredBox(color: Color(0x4D000000)),
-                        Image.network(img, fit: BoxFit.contain,
-                          errorBuilder: (_, __, ___) => (t.artworkUrl != null)
-                            ? Image.network(t.artworkUrl!,
-                                fit: BoxFit.contain,
-                                errorBuilder: (_, __, ___) =>
-                                  const ColoredBox(color: kCard))
-                            : const ColoredBox(color: kCard)),
-                      ]);
+                      return Image.network(img, fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => (t.artworkUrl != null)
+                          ? Image.network(t.artworkUrl!, fit: BoxFit.cover,
+                              errorBuilder: (_, __, ___) =>
+                                const ColoredBox(color: kCard))
+                          : const ColoredBox(color: kCard));
                     }),
                     const DecoratedBox(decoration: BoxDecoration(
                       gradient: LinearGradient(
@@ -1730,6 +1718,15 @@ class AboutTab extends StatelessWidget {
         const SizedBox(height: 10),
         _bigButton(Icons.language, 'farooqmusic.com',
           () => openUrl('https://farooqmusic.com/')),
+        // ---- Support ----
+        _sectionTitle('SUPPORT'),
+        _bigButton(Icons.favorite_outline, 'Support on PayPal',
+          () => openUrl(
+            'https://www.paypal.com/donate/?business=farooq2%40hotmail.com'
+            '&item_name=Support+Farooq+Music&currency_code=USD')),
+        const SizedBox(height: 6),
+        Center(child: Text('farooq2@hotmail.com',
+          style: TextStyle(color: kMuted.withOpacity(0.8), fontSize: 12))),
         const SizedBox(height: 24),
         Center(child: Text('Made with Suno AI · © Farooq Music',
           style: TextStyle(color: kMuted.withOpacity(0.7), fontSize: 11))),
