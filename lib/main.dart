@@ -1742,6 +1742,12 @@ class FullPlayer extends StatelessWidget {
                   label: const Text('Share',
                     style: TextStyle(color:kLight, fontSize:13)),
                   onPressed: () => shareTrack(track!)),
+              if (track != null)
+                TextButton.icon(
+                  icon: const Icon(Icons.playlist_add, color:kLight, size:18),
+                  label: const Text('Playlist',
+                    style: TextStyle(color:kLight, fontSize:13)),
+                  onPressed: () => addToPlaylistSheet(ctx, track!)),
               if (track?.lyrics != null)
                 TextButton.icon(
                   icon: const Icon(Icons.article_outlined,
