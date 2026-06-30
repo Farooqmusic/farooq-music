@@ -1734,41 +1734,37 @@ class FullPlayer extends StatelessWidget {
                 ].where((e) => e.isNotEmpty).join('   ·   '),
                   style: const TextStyle(color:kLight, fontSize:12))),
             const SizedBox(height: 8),
-            Wrap(alignment: WrapAlignment.center,
-              spacing: 2, runSpacing: 0, children: [
-              if (track != null)
+            Builder(builder: (bctx) {
+              Widget mk(IconData ic, String t, VoidCallback fn) =>
                 TextButton.icon(
-                  icon: const Icon(Icons.share, color:kLight, size:18),
-                  label: const Text('Share',
-                    style: TextStyle(color:kLight, fontSize:13)),
-                  onPressed: () => shareTrack(track!)),
-              if (track != null)
-                TextButton.icon(
-                  icon: const Icon(Icons.playlist_add, color:kLight, size:18),
-                  label: const Text('Playlist',
-                    style: TextStyle(color:kLight, fontSize:13)),
-                  onPressed: () => addToPlaylistSheet(ctx, track!)),
-              if (track?.lyrics != null)
-                TextButton.icon(
-                  icon: const Icon(Icons.article_outlined,
-                    color:kLight, size:18),
-                  label: const Text('Lyrics',
-                    style: TextStyle(color:kLight, fontSize:13)),
-                  onPressed: () => openUrl(track!.lyrics!)),
-              if (track?.explanation != null)
-                TextButton.icon(
-                  icon: const Icon(Icons.menu_book_outlined,
-                    color:kLight, size:18),
-                  label: const Text('Explanation',
-                    style: TextStyle(color:kLight, fontSize:13)),
-                  onPressed: () => openUrl(track!.explanation!))])])),
-        const SizedBox(height: 10),
-        // Colorful animated sound-wave visualizer (Point 3). Sits ABOVE the
-        // progress bar; the spacing below pushes the bar + controls down.
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 28),
-          child: AudioWaveBar(height: 60)),
-        const SizedBox(height: 18),
+                  style: TextButton.styleFrom(
+                    foregroundColor: kLight, alignment: Alignment.center),
+                  icon: Icon(ic, color: kLight, size: 18),
+                  label: Text(t,
+                    style: const TextStyle(color: kLight, fontSize: 13)),
+                  onPressed: fn);
+              final items = <Widget>[];
+              if (track != null) {
+                items.add(mk(Icons.share, 'Share',
+                  () => shareTrack(track!)));
+                items.add(mk(Icons.playlist_add, 'Playlist',
+                  () => addToPlaylistSheet(ctx, track!)));
+              }
+              if (track?.lyrics != null) {
+                items.add(mk(Icons.article_outlined, 'Lyrics',
+                  () => openUrl(track!.lyrics!)));
+              }
+              if (track?.explanation != null) {
+                items.add(mk(Icons.menu_book_outlined, 'Explanation',
+                  () => openUrl(track!.explanation!)));
+              }
+              final cw = (MediaQuery.of(bctx).size.width - 72) / 2;
+              return Wrap(spacing: 12, runSpacing: 2,
+                alignment: WrapAlignment.center,
+                children: items
+                  .map((c) => SizedBox(width: cw, child: c)).toList());
+            })])),
+        const SizedBox(height: 22),
         const _ProgressBar(),
         const SizedBox(height: 20),
         ValueListenableBuilder<bool>(
