@@ -1276,31 +1276,7 @@ class FullPlayer extends StatelessWidget {
           padding: EdgeInsets.symmetric(horizontal: 28),
           child: AudioWaveBar(height: 60)),
         const SizedBox(height: 18),
-        StreamBuilder<Duration>(
-          stream: player.positionStream,
-          builder: (_, ps) {
-            final pos = ps.data ?? Duration.zero;
-            final tot = player.duration ?? Duration.zero;
-            final prog = tot.inMilliseconds > 0
-              ? pos.inMilliseconds/tot.inMilliseconds : 0.0;
-            return Padding(
-              padding: const EdgeInsets.symmetric(horizontal:24),
-              child: Column(children: [
-                SliderTheme(data: SliderTheme.of(context).copyWith(
-                  activeTrackColor:kPrimary, inactiveTrackColor:kBorder,
-                  thumbColor:kLight, overlayColor:kPrimary.withOpacity(0.2),
-                  trackHeight:4),
-                  child: Slider(value: prog.clamp(0.0,1.0),
-                    onChanged: (v) => player.seek(Duration(
-                      milliseconds: (v*(player.duration
-                        ?.inMilliseconds ?? 0)).round())))),
-                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                  Text(_fmt(pos),
-                    style: const TextStyle(color:kMuted, fontSize:12)),
-                  Text(_fmt(tot),
-                    style: const TextStyle(color:kMuted, fontSize:12))])]));
-          }),
+        const _ProgressBar(),
         const SizedBox(height: 20),
         ValueListenableBuilder<bool>(
           valueListenable: isPlaying,
@@ -1410,7 +1386,9 @@ class _AudioWaveBarState extends State<AudioWaveBar> {
     if (mounted && _loadedId == t.id) setState(() => _bars = bars);
   }
 
-  // Reduce SoundCloud's ~1800 samples down to _barCount averaged bars (0..1).
+  // Reduce SoundCloud's ~1800 samples down to _barCount bars (0..1). We take
+  // the PEAK (max) of each bucket — averaging flattens the shape and makes it
+  // look like a plain bar; peaks keep the characteristic waveform spikes.
   List<double> _downsample(List raw, int n) {
     double maxV = 1;
     for (final v in raw) {
@@ -1422,13 +1400,13 @@ class _AudioWaveBarState extends State<AudioWaveBar> {
     for (int i = 0; i < n; i++) {
       final start = (i * per).floor();
       final end = ((i + 1) * per).floor();
-      double sum = 0; int cnt = 0;
+      double peak = 0;
       for (int k = start; k < end && k < raw.length; k++) {
         final v = raw[k];
-        sum += (v is num) ? v.toDouble() : 0.0; cnt++;
+        final d = (v is num) ? v.toDouble() : 0.0;
+        if (d > peak) peak = d;
       }
-      final avg = cnt > 0 ? sum / cnt : 0.0;
-      out.add((avg / maxV).clamp(0.06, 1.0).toDouble());
+      out.add((peak / maxV).clamp(0.06, 1.0).toDouble());
     }
     return out;
   }
@@ -1452,8 +1430,9 @@ class _AudioWaveBarState extends State<AudioWaveBar> {
       final w = box.maxWidth;
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
+        // Single tap = one seek (cheap). No drag-seek here: continuously
+        // seeking a streamed source while dragging causes the player to hang.
         onTapDown: (e) => _seekFraction(e.localPosition.dx / w),
-        onHorizontalDragUpdate: (e) => _seekFraction(e.localPosition.dx / w),
         child: StreamBuilder<Duration>(
           stream: player.positionStream,
           builder: (_, ps) {
@@ -1516,6 +1495,64 @@ class _WavePainter extends CustomPainter {
   @override
   bool shouldRepaint(_WavePainter old) =>
     old.progress != progress || !identical(old.bars, bars);
+}
+
+// Progress bar that scrubs smoothly WITHOUT hanging: while dragging it only
+// moves the thumb locally (no seeks); it issues a single seek when released.
+class _ProgressBar extends StatefulWidget {
+  const _ProgressBar();
+  @override
+  State<_ProgressBar> createState() => _ProgressBarState();
+}
+
+class _ProgressBarState extends State<_ProgressBar> {
+  double? _drag;   // non-null while the user is dragging
+
+  String _fmt(Duration d) =>
+    '${d.inMinutes}:${(d.inSeconds % 60).toString().padLeft(2, '0')}';
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<Duration>(
+      stream: player.positionStream,
+      builder: (_, ps) {
+        final pos = ps.data ?? Duration.zero;
+        final tot = player.duration ?? Duration.zero;
+        final live = tot.inMilliseconds > 0
+          ? (pos.inMilliseconds / tot.inMilliseconds).clamp(0.0, 1.0)
+          : 0.0;
+        final value = _drag ?? live.toDouble();
+        final shownPos = _drag != null
+          ? Duration(milliseconds: (_drag! * tot.inMilliseconds).round())
+          : pos;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Column(children: [
+            SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                activeTrackColor: kPrimary, inactiveTrackColor: kBorder,
+                thumbColor: kLight, overlayColor: kPrimary.withOpacity(0.2),
+                trackHeight: 4),
+              child: Slider(
+                value: value,
+                onChanged: (v) => setState(() => _drag = v),
+                onChangeEnd: (v) {
+                  final ms = (v * (player.duration?.inMilliseconds ?? 0))
+                    .round();
+                  player.seek(Duration(milliseconds: ms));
+                  setState(() => _drag = null);
+                })),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              Text(_fmt(shownPos),
+                style: const TextStyle(color: kMuted, fontSize: 12)),
+              Text(_fmt(tot),
+                style: const TextStyle(color: kMuted, fontSize: 12)),
+            ]),
+          ]),
+        );
+      },
+    );
+  }
 }
 
 class VideoTab extends StatelessWidget {
