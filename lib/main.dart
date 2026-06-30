@@ -1311,12 +1311,11 @@ class FullPlayer extends StatelessWidget {
 }
 
 // ---- Sound-wave visualizer (now-playing screen) ----
-// Draws the track's REAL waveform from SoundCloud (each track's waveform_url
-// -> a JSON of amplitude samples), so the bars match the actual song. A
-// colored playhead fills the bars left-to-right IN SYNC with playback
-// position, and tapping/dragging the bar seeks. (just_audio exposes no live
-// FFT for a streamed source, so this position-synced real waveform — the same
-// approach SoundCloud uses — is the accurate way to make it react to the music.)
+// A colorful, mirrored "equalizer" that DANCES while a track plays and rests
+// when paused. Each bar's base height comes from the track's REAL SoundCloud
+// waveform (so every song looks different and it never feels random), and a
+// gentle per-bar oscillation makes the bars move with the music. Seeking is
+// handled by the progress slider below — this is purely a visual.
 class AudioWaveBar extends StatefulWidget {
   final double height;
   const AudioWaveBar({super.key, this.height = 60});
@@ -1324,21 +1323,30 @@ class AudioWaveBar extends StatefulWidget {
   State<AudioWaveBar> createState() => _AudioWaveBarState();
 }
 
-class _AudioWaveBarState extends State<AudioWaveBar> {
+class _AudioWaveBarState extends State<AudioWaveBar>
+    with SingleTickerProviderStateMixin {
   static const int _barCount = 48;
   List<double> _bars = const [];
   String? _loadedId;
   final Map<String, List<double>> _cache = {};
+  late final AnimationController _anim;
+  late final List<double> _phase;
 
   @override
   void initState() {
     super.initState();
+    // Spread phases so neighbouring bars move at slightly different times,
+    // giving an organic dance rather than one obvious repeating pulse.
+    _phase = List.generate(_barCount, (i) => i * 0.55);
+    _anim = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 1300))..repeat();
     currentTrack.addListener(_onTrack);
     _onTrack();
   }
 
   @override
   void dispose() {
+    _anim.dispose();
     currentTrack.removeListener(_onTrack);
     super.dispose();
   }
@@ -1414,76 +1422,60 @@ class _AudioWaveBarState extends State<AudioWaveBar> {
   // Stable pseudo-waveform if a track has no waveform_url (rare).
   List<double> _fallback(String id) {
     final rnd = Random(id.hashCode);
-    return List.generate(_barCount, (_) => 0.2 + rnd.nextDouble() * 0.75);
-  }
-
-  void _seekFraction(double f) {
-    final d = player.duration;
-    if (d == null) return;
-    player.seek(Duration(
-      milliseconds: (f.clamp(0.0, 1.0) * d.inMilliseconds).round()));
+    return List.generate(_barCount, (_) => 0.25 + rnd.nextDouble() * 0.7);
   }
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(builder: (_, box) {
-      final w = box.maxWidth;
-      return GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        // Single tap = one seek (cheap). No drag-seek here: continuously
-        // seeking a streamed source while dragging causes the player to hang.
-        onTapDown: (e) => _seekFraction(e.localPosition.dx / w),
-        child: StreamBuilder<Duration>(
-          stream: player.positionStream,
-          builder: (_, ps) {
-            final pos = ps.data ?? Duration.zero;
-            final tot = player.duration ?? Duration.zero;
-            final frac = tot.inMilliseconds > 0
-              ? (pos.inMilliseconds / tot.inMilliseconds).clamp(0.0, 1.0)
-              : 0.0;
-            return SizedBox(
-              height: widget.height, width: double.infinity,
-              child: CustomPaint(
-                painter:
-                  _WavePainter(bars: _bars, progress: frac.toDouble())),
-            );
-          }),
-      );
-    });
+    final base = _bars.isEmpty ? _fallback(_loadedId ?? 'x') : _bars;
+    return ValueListenableBuilder<bool>(
+      valueListenable: isPlaying,
+      builder: (_, playing, __) {
+        CustomPaint frame(double tv) => CustomPaint(
+          painter: _WavePainter(
+            bars: base, phase: _phase, t: tv, playing: playing));
+        return SizedBox(
+          height: widget.height,
+          width: double.infinity,
+          // Repaint every frame only while playing; static (frozen) when paused.
+          child: playing
+            ? AnimatedBuilder(
+                animation: _anim, builder: (_, __) => frame(_anim.value))
+            : frame(_anim.value),
+        );
+      },
+    );
   }
 }
 
 class _WavePainter extends CustomPainter {
   final List<double> bars;
-  final double progress;     // 0..1 playback fraction
-  _WavePainter({required this.bars, required this.progress});
+  final List<double> phase;
+  final double t;          // 0..1 animation clock
+  final bool playing;
+  _WavePainter({required this.bars, required this.phase,
+    required this.t, required this.playing});
 
   @override
   void paint(Canvas canvas, Size size) {
-    final mid = size.height / 2;
-    if (bars.isEmpty) {
-      // Thin baseline shown while the waveform is still loading.
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromLTWH(0, mid - 1.5, size.width, 3),
-          const Radius.circular(2)),
-        Paint()..color = const Color(0x33c77dff));
-      return;
-    }
     final n = bars.length;
     const gap = 3.0;
     final bw = (size.width - gap * (n - 1)) / n;
-    final playedX = size.width * progress;
+    final mid = size.height / 2;
+    final clock = t * 2 * pi;
     for (int i = 0; i < n; i++) {
-      final h = (size.height * 0.14) + bars[i] * (size.height * 0.86);
+      final baseH = (size.height * 0.18) + bars[i] * (size.height * 0.82);
+      // While playing, each bar dances between ~55% and 100% of its real
+      // height; while paused it sits at full real height (frozen).
+      final osc = playing
+        ? (0.55 + 0.45 * (sin(clock + phase[i]) * 0.5 + 0.5))
+        : 1.0;
+      final h = baseH * osc;
       final x = i * (bw + gap);
-      final played = (x + bw / 2) <= playedX;
-      final hue = (262 + (i / n) * 130) % 360;   // violet -> magenta sweep
-      // Played bars are bright/colorful; not-yet-played bars are a dim tint of
-      // the same hue. The bright edge advances with the song = synced.
-      final color = played
-        ? HSVColor.fromAHSV(1.0, hue, 0.72, 1.0).toColor()
-        : HSVColor.fromAHSV(0.32, hue, 0.45, 0.85).toColor();
+      final hue = (262 + (i / n) * 130) % 360;   // violet -> pink -> orange
+      final color =
+        HSVColor.fromAHSV(playing ? 1.0 : 0.75, hue, 0.72, 1.0).toColor();
+      // Mirrored around the centre line = clear "equalizer" look (not a bar).
       canvas.drawRRect(
         RRect.fromRectAndRadius(
           Rect.fromLTWH(x, mid - h / 2, bw, h),
@@ -1494,7 +1486,7 @@ class _WavePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_WavePainter old) =>
-    old.progress != progress || !identical(old.bars, bars);
+    old.t != t || old.playing != playing || !identical(old.bars, bars);
 }
 
 // Progress bar that scrubs smoothly WITHOUT hanging: while dragging it only
