@@ -128,11 +128,11 @@ Future<void> removeAvatar() async {
 
 class SCTrack {
   final String id, title;
-  final String? genre, artworkUrl, bannerUrl, lyrics, explanation;
+  final String? genre, artworkUrl, bannerUrl, lyrics, explanation, waveformUrl;
   final int? duration, plays;
   const SCTrack({required this.id, required this.title,
     this.genre, this.artworkUrl, this.bannerUrl, this.duration, this.plays,
-    this.lyrics, this.explanation});
+    this.lyrics, this.explanation, this.waveformUrl});
   factory SCTrack.fromJson(Map<String, dynamic> j) {
     final art = (j['artwork'] ?? j['artwork_url']) as String?;
     String? str(dynamic v) => (v == null || v == '') ? null : v.toString();
@@ -141,6 +141,7 @@ class SCTrack {
       genre: (j['genre'] ?? '') == '' ? null : j['genre'] as String,
       artworkUrl: art,
       bannerUrl: str(j['banner']),
+      waveformUrl: str(j['waveform']),
       duration: j['duration'] is int ? j['duration'] as int : null,
       plays: j['plays'] is int ? j['plays'] as int : null,
       lyrics: str(j['lyrics']),
@@ -193,7 +194,10 @@ final player       = AudioPlayer();
 final currentTrack = ValueNotifier<SCTrack?>(null);
 final isPlaying    = ValueNotifier<bool>(false);
 final isShuffle    = ValueNotifier<bool>(false);
-final isRepeat     = ValueNotifier<bool>(false);   // true = repeat current track
+// Repeat mode: off (no loop), all (loop the whole current queue — used by the
+// Home & Album "Repeat" buttons), one (loop the single current track — used by
+// the now-playing player's "Repeat" button).
+final repeatMode   = ValueNotifier<LoopMode>(LoopMode.off);
 final isPreparing  = ValueNotifier<bool>(false);   // resolving playlist URLs
 
 List<SCTrack> queue = [];                 // same order as the loaded playlist
@@ -222,8 +226,10 @@ Future<void> playQueue(List<SCTrack> tracks, int index) async {
   final token = ++_playToken;
   final sig = _sigOf(tracks);
 
-  // Same list already loaded -> just jump to the tapped track (instant).
+  // Same list already loaded -> just jump to the requested track (instant).
+  // If shuffle is on, reshuffle first so "Play all" gives a fresh random order.
   if (sig == _loadedSig && _playlist != null && queue.isNotEmpty) {
+    if (isShuffle.value) await player.shuffle();
     final at = queue.indexWhere((t) => t.id == tracks[index].id);
     await player.seek(Duration.zero, index: at < 0 ? 0 : at);
     await player.play();
@@ -239,7 +245,7 @@ Future<void> playQueue(List<SCTrack> tracks, int index) async {
     _playlist = ConcatenatingAudioSource(children: sources);
     _loadedSig = sig;
 
-    await player.setLoopMode(isRepeat.value ? LoopMode.one : LoopMode.all);
+    await player.setLoopMode(repeatMode.value);
     await player.setShuffleModeEnabled(isShuffle.value);
     await player.setAudioSource(_playlist!, initialIndex: index);
     if (token != _playToken) return;
@@ -262,9 +268,70 @@ Future<void> toggleShuffle() async {
   if (isShuffle.value) await player.shuffle();
 }
 
-Future<void> toggleRepeat() async {
-  isRepeat.value = !isRepeat.value;
-  await player.setLoopMode(isRepeat.value ? LoopMode.one : LoopMode.all);
+// Repeat is a single global player mode. Tapping a "Repeat" button toggles
+// between OFF and that button's mode. The Home/Album buttons use "all" (loop
+// the queue); the player's button uses "one" (loop the single track).
+Future<void> _setRepeat(LoopMode m) async {
+  repeatMode.value = (repeatMode.value == m) ? LoopMode.off : m;
+  await player.setLoopMode(repeatMode.value);
+}
+Future<void> toggleRepeatAll() => _setRepeat(LoopMode.all);
+Future<void> toggleRepeatOne() => _setRepeat(LoopMode.one);
+
+// A split pill: [ Shuffle | Repeat ] — both halves are toggles that highlight
+// when active. Used on the Home page (scope = whole library) and the Album
+// screen (scope = that album's tracks). "Play all" then plays respecting these
+// toggles. Repeat here means "repeat all" (loop the queue).
+class ShuffleRepeatPill extends StatelessWidget {
+  const ShuffleRepeatPill({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 46,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        border: Border.all(color: kPrimary),
+        borderRadius: BorderRadius.circular(12)),
+      child: Row(children: [
+        Expanded(child: ValueListenableBuilder<bool>(
+          valueListenable: isShuffle,
+          builder: (_, on, __) => _PillHalf(
+            icon: Icons.shuffle, label: 'Shuffle',
+            active: on, onTap: toggleShuffle))),
+        Container(width: 1, color: kBorder),
+        Expanded(child: ValueListenableBuilder<LoopMode>(
+          valueListenable: repeatMode,
+          builder: (_, m, __) => _PillHalf(
+            icon: Icons.repeat, label: 'Repeat',
+            active: m == LoopMode.all, onTap: toggleRepeatAll))),
+      ]),
+    );
+  }
+}
+
+class _PillHalf extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+  const _PillHalf({required this.icon, required this.label,
+    required this.active, required this.onTap});
+  @override
+  Widget build(BuildContext context) {
+    final c = active ? Colors.white : kLight;
+    return Material(
+      color: active ? kPrimary : Colors.transparent,
+      child: InkWell(onTap: onTap, child: Center(child: Row(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center, children: [
+        Icon(icon, color: c, size: 18),
+        const SizedBox(width: 6),
+        Flexible(child: Text(label, overflow: TextOverflow.ellipsis,
+          style: TextStyle(color: c,
+            fontWeight: FontWeight.w700, fontSize: 13))),
+      ]))),
+    );
+  }
 }
 
 // Safety net: if a track errors mid-playback (rare — e.g. a CDN token expired
@@ -633,11 +700,12 @@ class _MusicState extends State<MusicTab> {
       (t.genre ?? '').toLowerCase().contains(q)).toList();
   }
 
-  Future<void> _playAll({bool shuffle = false}) async {
+  Future<void> _playAll() async {
     final list = _sorted;
     if (list.isEmpty) return;
-    isShuffle.value = shuffle;
-    await playQueue(list, 0);
+    // When shuffle is on, begin from a RANDOM track (not the newest one).
+    final start = isShuffle.value ? Random().nextInt(list.length) : 0;
+    await playQueue(list, start);
   }
 
   String _plays(int? n) {
@@ -808,30 +876,20 @@ class _MusicState extends State<MusicTab> {
     final all  = _sorted;
     return CustomScrollView(slivers: [
       _featuredBanner(),
-      // Play all / Shuffle
+      // Play all  +  [ Shuffle | Repeat ]
       SliverToBoxAdapter(child: Padding(
         padding: const EdgeInsets.fromLTRB(14, 12, 14, 2),
         child: Row(children: [
-          Expanded(child: ElevatedButton.icon(
-            onPressed: () => _playAll(shuffle: false),
+          Expanded(child: SizedBox(height: 46, child: ElevatedButton.icon(
+            onPressed: _playAll,
             style: ElevatedButton.styleFrom(backgroundColor: kPrimary,
-              padding: const EdgeInsets.symmetric(vertical: 12),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12))),
             icon: const Icon(Icons.play_arrow, color: Colors.white),
             label: const Text('Play all', style: TextStyle(
-              color: Colors.white, fontWeight: FontWeight.w700)))),
+              color: Colors.white, fontWeight: FontWeight.w700))))),
           const SizedBox(width: 10),
-          Expanded(child: OutlinedButton.icon(
-            onPressed: () => _playAll(shuffle: true),
-            style: OutlinedButton.styleFrom(
-              side: const BorderSide(color: kPrimary),
-              padding: const EdgeInsets.symmetric(vertical: 12),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12))),
-            icon: const Icon(Icons.shuffle, color: kLight),
-            label: const Text('Shuffle', style: TextStyle(
-              color: kLight, fontWeight: FontWeight.w700)))),
+          const Expanded(child: ShuffleRepeatPill()),
         ]))),
       _sectionHeader('New Releases'),
       SliverToBoxAdapter(child: _cardRow(feat, showPlays: false)),
@@ -1000,10 +1058,11 @@ class AlbumScreen extends StatelessWidget {
   // Upgrade SoundCloud artwork to a crisp t500x500 where possible.
   String _hiRes(String url) => url.replaceAll('-t300x300.', '-t500x500.');
 
-  Future<void> _play({bool shuffle = false}) async {
+  Future<void> _play() async {
     if (album.tracks.isEmpty) return;
-    isShuffle.value = shuffle;
-    await playQueue(album.tracks, 0);
+    // When shuffle is on, begin from a RANDOM track of this album.
+    final start = isShuffle.value ? Random().nextInt(album.tracks.length) : 0;
+    await playQueue(album.tracks, start);
   }
 
   Widget _cover(double side) {
@@ -1050,26 +1109,16 @@ class AlbumScreen extends StatelessWidget {
               style: const TextStyle(color: kMuted, fontSize: 13)),
             const SizedBox(height: 16),
             Row(children: [
-              Expanded(child: ElevatedButton.icon(
-                onPressed: () => _play(shuffle: false),
+              Expanded(child: SizedBox(height: 46, child: ElevatedButton.icon(
+                onPressed: _play,
                 style: ElevatedButton.styleFrom(backgroundColor: kPrimary,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12))),
                 icon: const Icon(Icons.play_arrow, color: Colors.white),
                 label: const Text('Play all', style: TextStyle(
-                  color: Colors.white, fontWeight: FontWeight.w700)))),
+                  color: Colors.white, fontWeight: FontWeight.w700))))),
               const SizedBox(width: 10),
-              Expanded(child: OutlinedButton.icon(
-                onPressed: () => _play(shuffle: true),
-                style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: kPrimary),
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12))),
-                icon: const Icon(Icons.shuffle, color: kLight),
-                label: const Text('Shuffle', style: TextStyle(
-                  color: kLight, fontWeight: FontWeight.w700)))),
+              const Expanded(child: ShuffleRepeatPill()),
             ]),
             const SizedBox(height: 8),
           ]))),
@@ -1277,18 +1326,21 @@ class FullPlayer extends StatelessWidget {
             IconButton(
               icon: const Icon(Icons.skip_next, color:kOn, size:36),
               onPressed: nextTrack),
-            ValueListenableBuilder<bool>(valueListenable: isRepeat,
-              builder: (_, r, __) => IconButton(
-                icon: Icon(Icons.repeat,
-                  color: r ? kLight : kMuted, size:26),
-                onPressed: toggleRepeat))])),
+            ValueListenableBuilder<LoopMode>(valueListenable: repeatMode,
+              builder: (_, m, __) => IconButton(
+                icon: Icon(Icons.repeat_one,
+                  color: m == LoopMode.one ? kLight : kMuted, size:26),
+                onPressed: toggleRepeatOne))])),
         const SizedBox(height: 20)])));
 }
 
-// ---- Colorful animated sound-wave visualizer (now-playing screen) ----
-// just_audio does not expose real audio frequency (FFT) data, so this is a
-// synthetic but lively bar visualizer: it animates while a track is playing
-// and settles to a calm baseline when paused. Purely decorative.
+// ---- Sound-wave visualizer (now-playing screen) ----
+// Draws the track's REAL waveform from SoundCloud (each track's waveform_url
+// -> a JSON of amplitude samples), so the bars match the actual song. A
+// colored playhead fills the bars left-to-right IN SYNC with playback
+// position, and tapping/dragging the bar seeks. (just_audio exposes no live
+// FFT for a streamed source, so this position-synced real waveform — the same
+// approach SoundCloud uses — is the accurate way to make it react to the music.)
 class AudioWaveBar extends StatefulWidget {
   final double height;
   const AudioWaveBar({super.key, this.height = 60});
@@ -1296,80 +1348,174 @@ class AudioWaveBar extends StatefulWidget {
   State<AudioWaveBar> createState() => _AudioWaveBarState();
 }
 
-class _AudioWaveBarState extends State<AudioWaveBar>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c;
-  final _rnd = Random();
-  late final List<double> _phase;
-  late final List<double> _speed;
-  static const int _bars = 42;
+class _AudioWaveBarState extends State<AudioWaveBar> {
+  static const int _barCount = 48;
+  List<double> _bars = const [];
+  String? _loadedId;
+  final Map<String, List<double>> _cache = {};
 
   @override
   void initState() {
     super.initState();
-    _phase = List.generate(_bars, (_) => _rnd.nextDouble() * pi * 2);
-    _speed = List.generate(_bars, (_) => 0.7 + _rnd.nextDouble() * 0.9);
-    _c = AnimationController(
-      vsync: this, duration: const Duration(seconds: 2))
-      ..repeat();
+    currentTrack.addListener(_onTrack);
+    _onTrack();
   }
 
   @override
-  void dispose() { _c.dispose(); super.dispose(); }
+  void dispose() {
+    currentTrack.removeListener(_onTrack);
+    super.dispose();
+  }
+
+  void _onTrack() {
+    final t = currentTrack.value;
+    if (t == null) {
+      if (mounted) setState(() { _bars = const []; _loadedId = null; });
+      return;
+    }
+    if (t.id == _loadedId) return;
+    _loadedId = t.id;
+    final cached = _cache[t.id];
+    if (cached != null) {
+      if (mounted) setState(() => _bars = cached);
+      return;
+    }
+    if (mounted) setState(() => _bars = const []);   // baseline while loading
+    _fetchWaveform(t);
+  }
+
+  Future<void> _fetchWaveform(SCTrack t) async {
+    List<double> bars;
+    final url = t.waveformUrl;
+    if (url == null) {
+      bars = _fallback(t.id);
+    } else {
+      try {
+        final r = await http
+          .get(Uri.parse(url))
+          .timeout(const Duration(seconds: 8));
+        if (r.statusCode == 200) {
+          final j = jsonDecode(r.body);
+          final raw = (j is Map && j['samples'] is List)
+            ? (j['samples'] as List) : const [];
+          bars = raw.isEmpty ? _fallback(t.id) : _downsample(raw, _barCount);
+        } else {
+          bars = _fallback(t.id);
+        }
+      } catch (_) {
+        bars = _fallback(t.id);
+      }
+    }
+    _cache[t.id] = bars;
+    if (mounted && _loadedId == t.id) setState(() => _bars = bars);
+  }
+
+  // Reduce SoundCloud's ~1800 samples down to _barCount averaged bars (0..1).
+  List<double> _downsample(List raw, int n) {
+    double maxV = 1;
+    for (final v in raw) {
+      final d = (v is num) ? v.toDouble() : 0.0;
+      if (d > maxV) maxV = d;
+    }
+    final out = <double>[];
+    final per = raw.length / n;
+    for (int i = 0; i < n; i++) {
+      final start = (i * per).floor();
+      final end = ((i + 1) * per).floor();
+      double sum = 0; int cnt = 0;
+      for (int k = start; k < end && k < raw.length; k++) {
+        final v = raw[k];
+        sum += (v is num) ? v.toDouble() : 0.0; cnt++;
+      }
+      final avg = cnt > 0 ? sum / cnt : 0.0;
+      out.add((avg / maxV).clamp(0.06, 1.0).toDouble());
+    }
+    return out;
+  }
+
+  // Stable pseudo-waveform if a track has no waveform_url (rare).
+  List<double> _fallback(String id) {
+    final rnd = Random(id.hashCode);
+    return List.generate(_barCount, (_) => 0.2 + rnd.nextDouble() * 0.75);
+  }
+
+  void _seekFraction(double f) {
+    final d = player.duration;
+    if (d == null) return;
+    player.seek(Duration(
+      milliseconds: (f.clamp(0.0, 1.0) * d.inMilliseconds).round()));
+  }
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: isPlaying,
-      builder: (_, playing, __) => SizedBox(
-        height: widget.height,
-        width: double.infinity,
-        child: AnimatedBuilder(
-          animation: _c,
-          builder: (_, __) => CustomPaint(
-            painter: _WavePainter(
-              t: _c.value, phase: _phase, speed: _speed, playing: playing)),
-        ),
-      ),
-    );
+    return LayoutBuilder(builder: (_, box) {
+      final w = box.maxWidth;
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (e) => _seekFraction(e.localPosition.dx / w),
+        onHorizontalDragUpdate: (e) => _seekFraction(e.localPosition.dx / w),
+        child: StreamBuilder<Duration>(
+          stream: player.positionStream,
+          builder: (_, ps) {
+            final pos = ps.data ?? Duration.zero;
+            final tot = player.duration ?? Duration.zero;
+            final frac = tot.inMilliseconds > 0
+              ? (pos.inMilliseconds / tot.inMilliseconds).clamp(0.0, 1.0)
+              : 0.0;
+            return SizedBox(
+              height: widget.height, width: double.infinity,
+              child: CustomPaint(
+                painter:
+                  _WavePainter(bars: _bars, progress: frac.toDouble())),
+            );
+          }),
+      );
+    });
   }
 }
 
 class _WavePainter extends CustomPainter {
-  final double t;            // 0..1 animation clock
-  final List<double> phase;  // per-bar random phase
-  final List<double> speed;  // per-bar random speed
-  final bool playing;
-  _WavePainter({required this.t, required this.phase,
-    required this.speed, required this.playing});
+  final List<double> bars;
+  final double progress;     // 0..1 playback fraction
+  _WavePainter({required this.bars, required this.progress});
 
   @override
   void paint(Canvas canvas, Size size) {
-    final n = phase.length;
+    final mid = size.height / 2;
+    if (bars.isEmpty) {
+      // Thin baseline shown while the waveform is still loading.
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(0, mid - 1.5, size.width, 3),
+          const Radius.circular(2)),
+        Paint()..color = const Color(0x33c77dff));
+      return;
+    }
+    final n = bars.length;
     const gap = 3.0;
     final bw = (size.width - gap * (n - 1)) / n;
-    final mid = size.height / 2;
-    final clock = t * 2 * pi;
+    final playedX = size.width * progress;
     for (int i = 0; i < n; i++) {
-      final wave = playing
-        ? (sin(clock * speed[i] + phase[i]) * 0.5 + 0.5)
-        : 0.10;
-      final h = (size.height * 0.16) + wave * (size.height * 0.84);
+      final h = (size.height * 0.14) + bars[i] * (size.height * 0.86);
       final x = i * (bw + gap);
-      // Sweep hue across the bar for a colorful, theme-friendly look.
-      final hue = (262 + (i / n) * 130) % 360;   // violet -> pink -> magenta
-      final color = HSVColor.fromAHSV(
-        playing ? 1.0 : 0.45, hue, 0.72, 1.0).toColor();
-      final rect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(x, mid - h / 2, bw, h),
-        Radius.circular(bw / 2));
-      canvas.drawRRect(rect, Paint()..color = color);
+      final played = (x + bw / 2) <= playedX;
+      final hue = (262 + (i / n) * 130) % 360;   // violet -> magenta sweep
+      // Played bars are bright/colorful; not-yet-played bars are a dim tint of
+      // the same hue. The bright edge advances with the song = synced.
+      final color = played
+        ? HSVColor.fromAHSV(1.0, hue, 0.72, 1.0).toColor()
+        : HSVColor.fromAHSV(0.32, hue, 0.45, 0.85).toColor();
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(x, mid - h / 2, bw, h),
+          Radius.circular(bw / 2)),
+        Paint()..color = color);
     }
   }
 
   @override
   bool shouldRepaint(_WavePainter old) =>
-    old.t != t || old.playing != playing;
+    old.progress != progress || !identical(old.bars, bars);
 }
 
 class VideoTab extends StatelessWidget {
