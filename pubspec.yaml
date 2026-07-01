@@ -37,7 +37,9 @@ dependencies:
   just_audio: ^0.10.5
   just_audio_background: any
   http: ^1.6.0
-  youtube_player_iframe: ^5.2.2
+  # ---- In-app video (WebView-based YouTube player via our own proxy page) ----
+  webview_flutter: ^4.13.1
+  webview_flutter_wkwebview: ^3.22.0
   share_plus: ^13.1.0
   audio_session: ^0.2.3
   url_launcher: ^6.3.1
