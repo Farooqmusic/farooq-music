@@ -2268,6 +2268,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   bool _loadingComments = true;
   List<Map<String, dynamic>> _comments = [];
   bool _isFullscreen = false;
+  SystemUiMode _uiMode = SystemUiMode.edgeToEdge;
 
   @override
   void initState() {
@@ -2319,20 +2320,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
     super.dispose();
   }
 
-  // Flutter-controlled fullscreen. iOS WebView can't do the YouTube button's
-  // own fullscreen reliably, so we rotate to landscape, hide the system UI and
-  // the app header, and let the (inline) player fill the whole screen.
-  void _toggleFullscreen() {
-    setState(() => _isFullscreen = !_isFullscreen);
-    if (_isFullscreen) {
-      SystemChrome.setPreferredOrientations(const [
-        DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    } else {
-      SystemChrome.setPreferredOrientations(const [
-        DeviceOrientation.portraitUp]);
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    }
+  // Force the device orientation for fullscreen. The header/system-UI hiding
+  // is driven by the actual orientation inside build(), so rotating the phone
+  // works too.
+  void _setFullscreen(bool on) {
+    setState(() => _isFullscreen = on);
+    SystemChrome.setPreferredOrientations(on
+      ? const [DeviceOrientation.landscapeLeft,
+               DeviceOrientation.landscapeRight]
+      : const [DeviceOrientation.portraitUp]);
   }
 
   void _share() => Share.share(
@@ -2340,15 +2336,32 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Fullscreen when explicitly toggled OR whenever the device is landscape,
+    // so simply rotating the phone also hides the app header and fills the
+    // screen (this is what removes the purple bar staying on top).
+    final landscape =
+      MediaQuery.of(context).orientation == Orientation.landscape;
+    final fs = _isFullscreen || landscape;
+
+    // Keep the system bars hidden while fullscreen (covers manual rotation too).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final mode = fs ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge;
+      if (mode != _uiMode) {
+        _uiMode = mode;
+        SystemChrome.setEnabledSystemUIMode(mode);
+      }
+    });
+
     return Scaffold(
-      backgroundColor: _isFullscreen ? Colors.black : kBg,
-      appBar: _isFullscreen ? null : AppBar(backgroundColor: kBg, elevation: 0,
+      backgroundColor: fs ? Colors.black : kBg,
+      appBar: fs ? null : AppBar(backgroundColor: kBg, elevation: 0,
         iconTheme: const IconThemeData(color: kOn),
         title: const Text('Video',
           style: TextStyle(color: kOn, fontWeight: FontWeight.w700))),
       body: LayoutBuilder(builder: (context, c) {
         // Fullscreen: player fills the whole area; otherwise a 16:9 band.
-        final playerH = _isFullscreen ? c.maxHeight : c.maxWidth * 9 / 16;
+        final playerH = fs ? c.maxHeight : c.maxWidth * 9 / 16;
         return Column(children: [
           SizedBox(
             width: double.infinity,
@@ -2363,13 +2376,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                   shape: const CircleBorder(),
                   child: IconButton(
                     iconSize: 22, visualDensity: VisualDensity.compact,
-                    icon: Icon(_isFullscreen
+                    icon: Icon(fs
                       ? Icons.fullscreen_exit : Icons.fullscreen,
                       color: Colors.white),
-                    onPressed: _toggleFullscreen))),
+                    onPressed: () => _setFullscreen(!fs)))),
             ]),
           ),
-          if (!_isFullscreen)
+          if (!fs)
             Expanded(child: ListView(padding: const EdgeInsets.all(16),
               children: [
                 Text(widget.video.title,
