@@ -12,11 +12,17 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:crypto/crypto.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:youtube_player_iframe/youtube_player_iframe.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 import 'dart:typed_data';
 import 'dart:math';
 
 const kBaseUrl = 'https://farooqmusic.com/mobile.php';
+// In-app YouTube playback goes through this small proxy page on our own domain
+// so the WebView presents a valid referrer/origin (farooqmusic.com). This is
+// what fixes YouTube "Error 153 / 152" inside the iOS WKWebView. The page loads
+// the youtube-nocookie embed.
+const kVideoPage = 'https://farooqmusic.com/ytplay.html';
 const kBg      = Color(0xFF1a0e22);
 const kCard    = Color(0xFF23172b);
 const kPrimary = Color(0xFF9d4edd);
@@ -2258,17 +2264,33 @@ class VideoPlayerScreen extends StatefulWidget {
 }
 
 class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
-  late final YoutubePlayerController _controller;
+  late final WebViewController _controller;
   bool _loadingComments = true;
   List<Map<String, dynamic>> _comments = [];
 
   @override
   void initState() {
     super.initState();
-    _controller = YoutubePlayerController.fromVideoId(
-      videoId: widget.video.id,
-      autoPlay: true,
-      params: const YoutubePlayerParams(showFullscreenButton: true));
+
+    // iOS (WKWebView) needs inline playback allowed and the user-gesture
+    // requirement removed, otherwise the embedded YouTube video won't autoplay
+    // or play inline.
+    late final PlatformWebViewControllerCreationParams params;
+    if (WebViewPlatform.instance is WebKitWebViewPlatform) {
+      params = WebKitWebViewControllerCreationParams(
+        allowsInlineMediaPlayback: true,
+        mediaTypesRequiringUserAction: const <PlaybackMediaTypes>{},
+      );
+    } else {
+      params = const PlatformWebViewControllerCreationParams();
+    }
+
+    _controller = WebViewController.fromPlatformCreationParams(params)
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(Colors.black)
+      ..loadRequest(Uri.parse(
+        '$kVideoPage?v=${Uri.encodeComponent(widget.video.id)}&autoplay=1'));
+
     _loadComments();
   }
 
@@ -2287,24 +2309,29 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   }
 
   @override
-  void dispose() { _controller.close(); super.dispose(); }
+  void dispose() {
+    // Stop any audio that may still be playing when leaving the screen.
+    _controller.loadRequest(Uri.parse('about:blank'));
+    super.dispose();
+  }
 
   void _share() => Share.share(
     '${widget.video.title}\nhttps://youtu.be/${widget.video.id}');
 
   @override
   Widget build(BuildContext context) {
-    return YoutubePlayerScaffold(
-      controller: _controller,
-      aspectRatio: 16 / 9,
-      builder: (context, player) => Scaffold(
-        backgroundColor: kBg,
-        appBar: AppBar(backgroundColor: kBg, elevation: 0,
-          iconTheme: const IconThemeData(color: kOn),
-          title: const Text('Video',
-            style: TextStyle(color: kOn, fontWeight: FontWeight.w700))),
-        body: Column(children: [
-          player,
+    return Scaffold(
+      backgroundColor: kBg,
+      appBar: AppBar(backgroundColor: kBg, elevation: 0,
+        iconTheme: const IconThemeData(color: kOn),
+        title: const Text('Video',
+          style: TextStyle(color: kOn, fontWeight: FontWeight.w700))),
+      body: Column(children: [
+        AspectRatio(
+          aspectRatio: 16 / 9,
+          child: ColoredBox(color: Colors.black,
+            child: WebViewWidget(controller: _controller)),
+        ),
           Expanded(child: ListView(padding: const EdgeInsets.all(16),
             children: [
               Text(widget.video.title,
@@ -2336,7 +2363,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                 ..._comments.map(_commentTile),
             ])),
         ]),
-      ),
     );
   }
 
