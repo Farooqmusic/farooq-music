@@ -2267,6 +2267,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   late final WebViewController _controller;
   bool _loadingComments = true;
   List<Map<String, dynamic>> _comments = [];
+  bool _isFullscreen = false;
 
   @override
   void initState() {
@@ -2312,7 +2313,26 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   void dispose() {
     // Stop any audio that may still be playing when leaving the screen.
     _controller.loadRequest(Uri.parse('about:blank'));
+    // Restore orientation + system UI in case we left while fullscreen.
+    SystemChrome.setPreferredOrientations(const []);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
+  }
+
+  // Flutter-controlled fullscreen. iOS WebView can't do the YouTube button's
+  // own fullscreen reliably, so we rotate to landscape, hide the system UI and
+  // the app header, and let the (inline) player fill the whole screen.
+  void _toggleFullscreen() {
+    setState(() => _isFullscreen = !_isFullscreen);
+    if (_isFullscreen) {
+      SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    } else {
+      SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.portraitUp]);
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
   }
 
   void _share() => Share.share(
@@ -2321,48 +2341,67 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: kBg,
-      appBar: AppBar(backgroundColor: kBg, elevation: 0,
+      backgroundColor: _isFullscreen ? Colors.black : kBg,
+      appBar: _isFullscreen ? null : AppBar(backgroundColor: kBg, elevation: 0,
         iconTheme: const IconThemeData(color: kOn),
         title: const Text('Video',
           style: TextStyle(color: kOn, fontWeight: FontWeight.w700))),
-      body: Column(children: [
-        AspectRatio(
-          aspectRatio: 16 / 9,
-          child: ColoredBox(color: Colors.black,
-            child: WebViewWidget(controller: _controller)),
-        ),
-          Expanded(child: ListView(padding: const EdgeInsets.all(16),
-            children: [
-              Text(widget.video.title,
-                style: const TextStyle(color: kOn, fontSize: 16,
-                  fontWeight: FontWeight.w800, height: 1.3)),
-              const SizedBox(height: 4),
-              Text(widget.channelTitle,
-                style: const TextStyle(color: kMuted, fontSize: 13)),
-              const SizedBox(height: 12),
-              Row(children: [
-                _action(Icons.share, 'Share', _share),
-                const SizedBox(width: 10),
-                _action(Icons.open_in_new, 'YouTube',
-                  () => openUrl('https://youtu.be/${widget.video.id}')),
-              ]),
-              const SizedBox(height: 18),
-              const Text('COMMENTS', style: TextStyle(color: kLight,
-                fontSize: 12, fontWeight: FontWeight.w700, letterSpacing: 1)),
-              const SizedBox(height: 8),
-              if (_loadingComments)
-                const Padding(padding: EdgeInsets.all(16),
-                  child: Center(child: CircularProgressIndicator(
-                    color: kPrimary, strokeWidth: 2)))
-              else if (_comments.isEmpty)
-                const Padding(padding: EdgeInsets.symmetric(vertical: 12),
-                  child: Text('No comments to show.',
-                    style: TextStyle(color: kMuted, fontSize: 13)))
-              else
-                ..._comments.map(_commentTile),
-            ])),
-        ]),
+      body: LayoutBuilder(builder: (context, c) {
+        // Fullscreen: player fills the whole area; otherwise a 16:9 band.
+        final playerH = _isFullscreen ? c.maxHeight : c.maxWidth * 9 / 16;
+        return Column(children: [
+          SizedBox(
+            width: double.infinity,
+            height: playerH,
+            child: Stack(children: [
+              Positioned.fill(child: ColoredBox(color: Colors.black,
+                child: WebViewWidget(controller: _controller))),
+              // Our own fullscreen control (YouTube's own button is disabled
+              // via fs=0 because its fullscreen is broken in the iOS WebView).
+              Positioned(right: 6, top: 6,
+                child: Material(color: Colors.black45,
+                  shape: const CircleBorder(),
+                  child: IconButton(
+                    iconSize: 22, visualDensity: VisualDensity.compact,
+                    icon: Icon(_isFullscreen
+                      ? Icons.fullscreen_exit : Icons.fullscreen,
+                      color: Colors.white),
+                    onPressed: _toggleFullscreen))),
+            ]),
+          ),
+          if (!_isFullscreen)
+            Expanded(child: ListView(padding: const EdgeInsets.all(16),
+              children: [
+                Text(widget.video.title,
+                  style: const TextStyle(color: kOn, fontSize: 16,
+                    fontWeight: FontWeight.w800, height: 1.3)),
+                const SizedBox(height: 4),
+                Text(widget.channelTitle,
+                  style: const TextStyle(color: kMuted, fontSize: 13)),
+                const SizedBox(height: 12),
+                Row(children: [
+                  _action(Icons.share, 'Share', _share),
+                  const SizedBox(width: 10),
+                  _action(Icons.open_in_new, 'YouTube',
+                    () => openUrl('https://youtu.be/${widget.video.id}')),
+                ]),
+                const SizedBox(height: 18),
+                const Text('COMMENTS', style: TextStyle(color: kLight,
+                  fontSize: 12, fontWeight: FontWeight.w700, letterSpacing: 1)),
+                const SizedBox(height: 8),
+                if (_loadingComments)
+                  const Padding(padding: EdgeInsets.all(16),
+                    child: Center(child: CircularProgressIndicator(
+                      color: kPrimary, strokeWidth: 2)))
+                else if (_comments.isEmpty)
+                  const Padding(padding: EdgeInsets.symmetric(vertical: 12),
+                    child: Text('No comments to show.',
+                      style: TextStyle(color: kMuted, fontSize: 13)))
+                else
+                  ..._comments.map(_commentTile),
+              ])),
+        ]);
+      }),
     );
   }
 
