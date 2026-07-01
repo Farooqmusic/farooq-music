@@ -16,6 +16,10 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 import 'dart:typed_data';
 import 'dart:math';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:encrypt/encrypt.dart' as enc;
 
 const kBaseUrl = 'https://farooqmusic.com/mobile.php';
 // In-app YouTube playback goes through this small proxy page on our own domain
@@ -217,15 +221,23 @@ String _sigOf(List<SCTrack> ts) => ts.map((t) => t.id).join(',');
 // 302-redirects to a FRESH SoundCloud URL on every request, so the player always
 // gets a valid (non-expired) stream — both for the first track and for each
 // auto-advance. No URLs are resolved up front, so playback starts instantly.
-AudioSource _sourceFor(SCTrack t) => AudioSource.uri(
-  Uri.parse('$kBaseUrl?action=play&id=${t.id}'),
-  tag: MediaItem(
+AudioSource _sourceFor(SCTrack t) {
+  final tag = MediaItem(
     id: t.id,
     title: t.title,
     artist: 'Mohammad Farooq \u00b7 Farooq Music',
     artUri: t.artworkUrl != null ? Uri.tryParse(t.artworkUrl!) : null,
-  ),
-);
+  );
+  // Downloaded track -> play the local AES-encrypted file (offline capable).
+  // Otherwise stream via the mobile.php proxy.
+  if (DownloadService.isDownloaded(t.id)) {
+    return _EncryptedAudioSource(t.id, tag: tag);
+  }
+  return AudioSource.uri(
+    Uri.parse('$kBaseUrl?action=play&id=${t.id}'),
+    tag: tag,
+  );
+}
 
 Future<void> playQueue(List<SCTrack> tracks, int index) async {
   if (tracks.isEmpty) return;
@@ -464,6 +476,9 @@ void main() async {
       serverClientId: kGoogleWebClientId,
     );
   } catch (_) {}
+
+  // ---- Offline downloads: load the local index of saved (encrypted) tracks ----
+  try { await DownloadService.init(); } catch (_) {}
 
   await JustAudioBackground.init(
     androidNotificationChannelId: 'com.farooqmusic.app.channel.audio',
@@ -1679,6 +1694,318 @@ class MiniPlayer extends StatelessWidget {
     });
 }
 
+// ===========================================================================
+// Offline encrypted downloads
+// ---------------------------------------------------------------------------
+// Logged-in users can save songs for OFFLINE playback. Each download is:
+//   1. fetched from the same mobile.php play endpoint (progressive MP3),
+//   2. AES-256 encrypted with a master key kept in the iOS Keychain,
+//   3. stored as "<id>.enc" in the app-support directory.
+// On playback the file is decrypted in memory only (never written back as a
+// plain file) and streamed to just_audio via a custom StreamAudioSource, so
+// the raw audio can't be extracted or played outside the app.
+// ===========================================================================
+
+// Ids of tracks available offline (loaded once at startup for sync lookups).
+final downloadedIds = ValueNotifier<Set<String>>(<String>{});
+
+class DownloadService {
+  static const _keyName = 'fm_dl_master_key_v1';
+  static final _secure = FlutterSecureStorage();
+
+  static Future<enc.Key> _masterKey() async {
+    var b64 = await _secure.read(key: _keyName);
+    if (b64 == null || b64.isEmpty) {
+      final k = enc.Key.fromSecureRandom(32);
+      b64 = k.base64;
+      await _secure.write(key: _keyName, value: b64);
+    }
+    return enc.Key.fromBase64(b64);
+  }
+
+  static Future<Directory> _dir() async {
+    final base = await getApplicationSupportDirectory();
+    final d = Directory('${base.path}/fm_downloads');
+    if (!await d.exists()) await d.create(recursive: true);
+    return d;
+  }
+
+  static Future<File> _fileFor(String id) async =>
+    File('${(await _dir()).path}/$id.enc');
+
+  static Future<File> _metaFile() async =>
+    File('${(await _dir()).path}/index.json');
+
+  static Future<Map<String, dynamic>> _loadMeta() async {
+    try {
+      final f = await _metaFile();
+      if (!await f.exists()) return {};
+      final j = json.decode(await f.readAsString());
+      return j is Map ? Map<String, dynamic>.from(j) : {};
+    } catch (_) { return {}; }
+  }
+
+  static Future<void> _saveMeta(Map<String, dynamic> m) async {
+    await (await _metaFile()).writeAsString(json.encode(m), flush: true);
+  }
+
+  // Call once at startup to populate [downloadedIds].
+  static Future<void> init() async {
+    final m = await _loadMeta();
+    downloadedIds.value = m.keys.toSet();
+  }
+
+  static bool isDownloaded(String id) => downloadedIds.value.contains(id);
+
+  // Fetch -> AES encrypt -> save file + metadata. Throws on failure.
+  static Future<void> download(SCTrack t) async {
+    final resp = await http
+      .get(Uri.parse('$kBaseUrl?action=play&id=${t.id}'))
+      .timeout(const Duration(seconds: 90));
+    if (resp.statusCode != 200 || resp.bodyBytes.length < 2048) {
+      throw 'Download failed';
+    }
+    final key = await _masterKey();
+    final iv = enc.IV.fromSecureRandom(16);
+    final encrypter = enc.Encrypter(enc.AES(key, mode: enc.AESMode.cbc));
+    final ct = encrypter.encryptBytes(resp.bodyBytes, iv: iv).bytes;
+    // Stored file layout: [16-byte IV][ciphertext].
+    final out = Uint8List(16 + ct.length);
+    out.setRange(0, 16, iv.bytes);
+    out.setRange(16, out.length, ct);
+    await (await _fileFor(t.id)).writeAsBytes(out, flush: true);
+
+    final m = await _loadMeta();
+    m[t.id] = {
+      'id': t.id, 'title': t.title, 'genre': t.genre,
+      'artwork': t.artworkUrl, 'duration': t.duration, 'plays': t.plays,
+      'lyrics': t.lyrics, 'explanation': t.explanation,
+    };
+    await _saveMeta(m);
+    downloadedIds.value = {...downloadedIds.value, t.id};
+  }
+
+  // Decrypt a saved file fully into memory (used by the audio source).
+  static Future<Uint8List> decryptedBytes(String id) async {
+    final raw = await (await _fileFor(id)).readAsBytes();
+    final iv = enc.IV(Uint8List.fromList(raw.sublist(0, 16)));
+    final ct = Uint8List.fromList(raw.sublist(16));
+    final key = await _masterKey();
+    final encrypter = enc.Encrypter(enc.AES(key, mode: enc.AESMode.cbc));
+    return Uint8List.fromList(
+      encrypter.decryptBytes(enc.Encrypted(ct), iv: iv));
+  }
+
+  static Future<void> remove(String id) async {
+    try {
+      final f = await _fileFor(id);
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+    final m = await _loadMeta();
+    m.remove(id);
+    await _saveMeta(m);
+    downloadedIds.value = {...downloadedIds.value}..remove(id);
+  }
+
+  static Future<List<SCTrack>> downloadedTracks() async {
+    final m = await _loadMeta();
+    return m.values
+      .map((v) => SCTrack.fromJson(Map<String, dynamic>.from(v)))
+      .toList();
+  }
+}
+
+// A just_audio source backed by an on-disk AES-encrypted file. The file is
+// decrypted lazily (only when playback needs it) and kept in memory just for
+// this instance, so plain audio never touches disk.
+class _EncryptedAudioSource extends StreamAudioSource {
+  final String trackId;
+  Uint8List? _data;
+  _EncryptedAudioSource(this.trackId, {dynamic tag}) : super(tag: tag);
+
+  Future<Uint8List> _load() async =>
+    _data ??= await DownloadService.decryptedBytes(trackId);
+
+  @override
+  Future<StreamAudioResponse> request([int? start, int? end]) async {
+    final data = await _load();
+    start ??= 0;
+    end ??= data.length;
+    return StreamAudioResponse(
+      sourceLength: data.length,
+      contentLength: end - start,
+      offset: start,
+      stream: Stream.value(List<int>.from(data.sublist(start, end))),
+      contentType: 'audio/mpeg',
+    );
+  }
+}
+
+// The Download / Downloaded / Saving control used on the now-playing screen.
+class _DownloadAction extends StatefulWidget {
+  final SCTrack track;
+  const _DownloadAction({required this.track});
+  @override
+  State<_DownloadAction> createState() => _DownloadActionState();
+}
+
+class _DownloadActionState extends State<_DownloadAction> {
+  bool _busy = false;
+
+  Future<void> _onTap() async {
+    if (authUser.value == null) {
+      _toast(context, 'Sign in to download');
+      return;
+    }
+    final id = widget.track.id;
+    if (DownloadService.isDownloaded(id)) {
+      final yes = await showDialog<bool>(context: context, builder: (c) =>
+        AlertDialog(
+          backgroundColor: kCard,
+          title: const Text('Remove download?',
+            style: TextStyle(color: kOn, fontSize: 17)),
+          content: const Text(
+            'This song will no longer be available offline.',
+            style: TextStyle(color: kMuted)),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c, false),
+              child: const Text('Cancel', style: TextStyle(color: kMuted))),
+            TextButton(onPressed: () => Navigator.pop(c, true),
+              child: const Text('Remove', style: TextStyle(color: kLight))),
+          ]));
+      if (yes == true) {
+        await DownloadService.remove(id);
+        if (mounted) _toast(context, 'Removed download');
+      }
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await DownloadService.download(widget.track);
+      if (mounted) _toast(context, 'Saved for offline');
+    } catch (_) {
+      if (mounted) _toast(context, 'Download failed. Try again.');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+    ValueListenableBuilder<Set<String>>(
+      valueListenable: downloadedIds,
+      builder: (_, ids, __) {
+        final done = ids.contains(widget.track.id);
+        return TextButton.icon(
+          style: TextButton.styleFrom(
+            foregroundColor: kLight, alignment: Alignment.center),
+          icon: _busy
+            ? const SizedBox(width: 18, height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2, color: kLight))
+            : Icon(done ? Icons.download_done : Icons.download_outlined,
+                color: kLight, size: 18),
+          label: Text(_busy ? 'Saving\u2026' : (done ? 'Downloaded' : 'Download'),
+            style: const TextStyle(color: kLight, fontSize: 13)),
+          onPressed: _busy ? null : _onTap);
+      });
+}
+
+// "My Downloads" screen (opened from the Account screen). Works offline.
+class DownloadsScreen extends StatefulWidget {
+  const DownloadsScreen({super.key});
+  @override
+  State<DownloadsScreen> createState() => _DownloadsScreenState();
+}
+
+class _DownloadsScreenState extends State<DownloadsScreen> {
+  List<SCTrack> _tracks = [];
+  bool _loading = true;
+
+  @override
+  void initState() { super.initState(); _load(); }
+
+  Future<void> _load() async {
+    final t = await DownloadService.downloadedTracks();
+    if (mounted) setState(() { _tracks = t; _loading = false; });
+  }
+
+  Future<void> _remove(SCTrack t) async {
+    await DownloadService.remove(t.id);
+    await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: kBg,
+      appBar: AppBar(backgroundColor: kBg, elevation: 0,
+        iconTheme: const IconThemeData(color: kOn),
+        title: const Text('My Downloads', style: TextStyle(
+          color: kOn, fontSize: 17, fontWeight: FontWeight.w800))),
+      body: _loading
+        ? const Center(child: CircularProgressIndicator(color: kPrimary))
+        : _tracks.isEmpty
+          ? const Center(child: Padding(padding: EdgeInsets.all(32),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.download_outlined, color: kMuted, size: 44),
+                SizedBox(height: 12),
+                Text('No downloads yet', style: TextStyle(
+                  color: kOn, fontSize: 16, fontWeight: FontWeight.w700)),
+                SizedBox(height: 6),
+                Text('Tap Download on the now-playing screen to save songs '
+                  'for offline listening.', textAlign: TextAlign.center,
+                  style: TextStyle(color: kMuted, fontSize: 13)),
+              ])))
+          : Column(children: [
+              Padding(padding: const EdgeInsets.fromLTRB(16, 12, 16, 2),
+                child: Row(children: [
+                  Expanded(child: Text(
+                    '${_tracks.length} song${_tracks.length == 1 ? '' : 's'} '
+                    'available offline',
+                    style: const TextStyle(color: kMuted, fontSize: 13))),
+                  TextButton.icon(
+                    onPressed: () => playQueue(_tracks, 0),
+                    icon: const Icon(Icons.play_arrow, color: kLight, size: 20),
+                    label: const Text('Play all',
+                      style: TextStyle(color: kLight))),
+                ])),
+              Expanded(child: ListView.builder(
+                padding: const EdgeInsets.only(bottom: 16),
+                itemCount: _tracks.length,
+                itemBuilder: (_, i) {
+                  final t = _tracks[i];
+                  return ListTile(
+                    onTap: () => playQueue(_tracks, i),
+                    leading: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: t.artworkUrl != null
+                        ? Image.network(t.artworkUrl!,
+                            width: 46, height: 46, fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => Container(
+                              width: 46, height: 46, color: kCard,
+                              child: const Icon(Icons.music_note,
+                                color: kPrimary)))
+                        : Container(width: 46, height: 46, color: kCard,
+                            child: const Icon(Icons.music_note,
+                              color: kPrimary))),
+                    title: Text(t.title, maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: kOn, fontWeight: FontWeight.w600)),
+                    subtitle: t.genre != null
+                      ? Text(t.genre!,
+                          style: const TextStyle(color: kMuted, fontSize: 12))
+                      : null,
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline, color: kMuted),
+                      onPressed: () => _remove(t)),
+                  );
+                })),
+            ]),
+    );
+  }
+}
+
 class FullPlayer extends StatelessWidget {
   const FullPlayer({super.key});
   String _fmt(Duration d) =>
@@ -1755,6 +2082,7 @@ class FullPlayer extends StatelessWidget {
                   () => shareTrack(track!)));
                 items.add(mk(Icons.playlist_add, 'Playlist',
                   () => addToPlaylistSheet(ctx, track!)));
+                items.add(_DownloadAction(track: track!));
               }
               if (track?.lyrics != null) {
                 items.add(mk(Icons.article_outlined, 'Lyrics',
@@ -2819,6 +3147,18 @@ class _AccountScreenState extends State<AccountScreen> {
           label: const Text('Change photo', style: TextStyle(
             color: kLight, fontWeight: FontWeight.w700)))),
         const SizedBox(height: 30),
+        OutlinedButton.icon(
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+            builder: (_) => const DownloadsScreen())),
+          style: OutlinedButton.styleFrom(
+            side: const BorderSide(color: kBorder),
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12))),
+          icon: const Icon(Icons.download_done, color: kLight, size: 20),
+          label: const Text('My Downloads',
+            style: TextStyle(color: kOn, fontWeight: FontWeight.w700))),
+        const SizedBox(height: 12),
         OutlinedButton.icon(
           onPressed: _busy ? null : () => _run(signOutUser,
             failMsg: 'Sign out failed', successMsg: 'Signed out'),
