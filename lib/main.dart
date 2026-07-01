@@ -2092,11 +2092,11 @@ class FullPlayer extends StatelessWidget {
                 items.add(mk(Icons.menu_book_outlined, 'Explanation',
                   () => openUrl(track!.explanation!)));
               }
-              final cw = (MediaQuery.of(bctx).size.width - 72) / 2;
-              return Wrap(spacing: 12, runSpacing: 2,
+              return Wrap(spacing: 10, runSpacing: 4,
                 alignment: WrapAlignment.center,
-                children: items
-                  .map((c) => SizedBox(width: cw, child: c)).toList());
+                runAlignment: WrapAlignment.center,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: items);
             })])),
         const SizedBox(height: 22),
         const _ProgressBar(),
